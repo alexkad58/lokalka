@@ -1,0 +1,1119 @@
+import { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  activateUserSubscription,
+  completeRecount,
+  createRecountFromPdf,
+  getAdminUsers,
+  getRecount,
+  getRecounts,
+  login,
+  logout,
+  me,
+  reopenRecount,
+  register,
+  resolveBarcode,
+  saveRecountProgress,
+  setAuthToken
+} from './api';
+
+const TOKEN_KEY = 'lokalka_auth_token';
+const BARCODE_CACHE_STORAGE_KEY = 'barcode_article_cache_v1';
+const AUTOSAVE_INTERVAL_MS = 8000;
+
+function normalizeQuery(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/ё/g, 'е')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function detectPackageType(productName) {
+  const normalizedName = normalizeQuery(productName);
+  if (normalizedName.includes('ж/б')) return 'can';
+  if (normalizedName.includes('ст')) return 'glass';
+  return 'pet';
+}
+
+function getPackageTypeLabel(packageType) {
+  if (packageType === 'can') return 'Железная банка';
+  if (packageType === 'glass') return 'Стеклянная бутылка';
+  return 'ПЭТ бутылка';
+}
+
+function formatSubscriptionStatusLabel(account) {
+  if (account?.isAdmin) return 'Администратор';
+  if (!account?.subscriptionActive || !account?.subscriptionUntil) return 'Неактивный';
+  const until = new Date(account.subscriptionUntil);
+  if (Number.isNaN(until.getTime())) return 'Неактивный';
+  return `Активный до ${until.toLocaleDateString('ru-RU')}`;
+}
+
+function formatRub(value) {
+  const amount = Number(value);
+  if (!Number.isFinite(amount)) return '0.00 руб.';
+  return `${amount.toFixed(2)} руб.`;
+}
+
+function formatStartDate(value) {
+  const date = new Date(value || '');
+  if (Number.isNaN(date.getTime())) return '-';
+  return date.toLocaleDateString('ru-RU');
+}
+
+function safeNumber(value) {
+  const parsed = Number.parseFloat(String(value).replace(',', '.'));
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function sanitizeFactExpression(value) {
+  let normalized = String(value || '').replace(/[^\d+]/g, '');
+  normalized = normalized.replace(/\++/g, '+');
+  normalized = normalized.replace(/^\+/, '');
+  return normalized;
+}
+
+function sumFactExpression(value) {
+  const normalized = sanitizeFactExpression(value);
+  const parts = normalized.split('+').filter(Boolean);
+  if (!parts.length) return null;
+
+  return parts.reduce((acc, part) => acc + safeNumber(part), 0);
+}
+
+function supportsBarcodeDetector() {
+  return typeof window !== 'undefined' && 'BarcodeDetector' in window;
+}
+
+function normalizeBarcodeValue(value) {
+  return String(value || '').trim();
+}
+
+function loadBarcodeCache() {
+  try {
+    const raw = localStorage.getItem(BARCODE_CACHE_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveBarcodeCache(cache) {
+  localStorage.setItem(BARCODE_CACHE_STORAGE_KEY, JSON.stringify(cache || {}));
+}
+
+function buildProgressPayload(values, search, barcodeCache) {
+  return {
+    values,
+    search,
+    barcodeCache
+  };
+}
+
+export default function App() {
+  const [token, setToken] = useState(() => localStorage.getItem(TOKEN_KEY) || '');
+  const [user, setUser] = useState(null);
+  const [authMode, setAuthMode] = useState('login');
+  const [authLogin, setAuthLogin] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authLoading, setAuthLoading] = useState(false);
+  const [authError, setAuthError] = useState('');
+
+  const [homeLoading, setHomeLoading] = useState(false);
+  const [activeSummary, setActiveSummary] = useState(null);
+  const [previousRecounts, setPreviousRecounts] = useState([]);
+  const [adminUsers, setAdminUsers] = useState([]);
+  const [activationDays, setActivationDays] = useState('30');
+  const [activatingUserId, setActivatingUserId] = useState('');
+
+  const [activeRecount, setActiveRecount] = useState(null);
+  const [values, setValues] = useState({});
+  const [search, setSearch] = useState('');
+
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [scannerOn, setScannerOn] = useState(false);
+  const [scannerStatus, setScannerStatus] = useState('Сканер выключен');
+  const [lastCode, setLastCode] = useState('');
+  const [torchOn, setTorchOn] = useState(false);
+  const [scanSuccessFlash, setScanSuccessFlash] = useState(false);
+  const [barcodeCache, setBarcodeCache] = useState(() => loadBarcodeCache());
+
+  const [mismatchModalOpen, setMismatchModalOpen] = useState(false);
+  const [completeModalOpen, setCompleteModalOpen] = useState(false);
+  const [counterName, setCounterName] = useState('');
+  const [groupName, setGroupName] = useState('');
+  const [includeTotalSummary, setIncludeTotalSummary] = useState(true);
+  const [activeFactCode, setActiveFactCode] = useState('');
+
+  const fileInputRef = useRef(null);
+  const videoRef = useRef(null);
+  const scannerStreamRef = useRef(null);
+  const scanRafRef = useRef(0);
+  const detectorRef = useRef(null);
+  const zxingReaderRef = useRef(null);
+  const zxingControlsRef = useRef(null);
+  const lastCodeRef = useRef('');
+  const lastCodeTsRef = useRef(0);
+  const pendingBarcodeRequestRef = useRef(new Map());
+  const flashTimeoutRef = useRef(0);
+  const autosaveSnapshotRef = useRef('');
+
+  useEffect(() => {
+    saveBarcodeCache(barcodeCache);
+  }, [barcodeCache]);
+
+  useEffect(() => {
+    return () => {
+      if (flashTimeoutRef.current) {
+        clearTimeout(flashTimeoutRef.current);
+      }
+      stopScanner();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!token) return;
+
+    setAuthToken(token);
+    me()
+      .then(res => {
+        const nextUser = res.user || null;
+        setUser(nextUser);
+
+        if (nextUser?.isAdmin) {
+          return refreshAdminUsers();
+        }
+        if (!nextUser?.subscriptionActive) {
+          setActiveRecount(null);
+          setActiveSummary(null);
+          setPreviousRecounts([]);
+          return;
+        }
+        return refreshDashboard();
+      })
+      .catch(() => {
+        handleLogout(true);
+      });
+  }, [token]);
+
+  useEffect(() => {
+    if (!activeRecount) return;
+    const payload = buildProgressPayload(values, search, barcodeCache);
+    autosaveSnapshotRef.current = JSON.stringify(payload);
+  }, [activeRecount?.id]);
+
+  useEffect(() => {
+    if (!activeRecount || !token) return;
+
+    const timer = window.setInterval(async () => {
+      const payload = buildProgressPayload(values, search, barcodeCache);
+      const snapshot = JSON.stringify(payload);
+      if (snapshot === autosaveSnapshotRef.current) return;
+
+      try {
+        await saveRecountProgress(activeRecount.id, payload);
+        autosaveSnapshotRef.current = snapshot;
+      } catch {
+        // no-op
+      }
+    }, AUTOSAVE_INTERVAL_MS);
+
+    return () => {
+      clearInterval(timer);
+    };
+  }, [activeRecount, token, values, search, barcodeCache]);
+
+  const filteredItems = useMemo(() => {
+    const query = normalizeQuery(search);
+    const items = activeRecount?.items || [];
+    if (!query) return items;
+
+    return items.filter(item => {
+      const code = normalizeQuery(item.code);
+      const name = normalizeQuery(item.name);
+      return code.includes(query) || name.includes(query);
+    });
+  }, [activeRecount, search]);
+
+  const mismatchItems = useMemo(() => {
+    if (!activeRecount?.items?.length) return [];
+
+    return activeRecount.items
+      .map(item => {
+        const row = computeRowState(item, values);
+        return {
+          ...item,
+          ...row
+        };
+      })
+      .filter(item => item.delta !== 0);
+  }, [activeRecount, values]);
+
+  function computeRowState(item, valueMap) {
+    const raw = sanitizeFactExpression(valueMap[item.code] ?? '');
+    const manualFact = sumFactExpression(raw);
+    const hasManual = raw.length > 0 && manualFact !== null;
+    const docQty = safeNumber(item.docQty);
+    const fact = hasManual ? manualFact : null;
+    const delta = fact === null ? null : fact - docQty;
+    const status = delta === null ? '' : delta === 0 ? 'match' : delta < 0 ? 'missing' : 'excess';
+    const factDisplay = hasManual ? raw : '';
+
+    return {
+      raw,
+      docQty,
+      fact,
+      factDisplay,
+      delta,
+      status
+    };
+  }
+
+  function triggerScanSuccessFlash() {
+    if (flashTimeoutRef.current) {
+      clearTimeout(flashTimeoutRef.current);
+    }
+    setScanSuccessFlash(true);
+    flashTimeoutRef.current = window.setTimeout(() => {
+      setScanSuccessFlash(false);
+      flashTimeoutRef.current = 0;
+    }, 220);
+  }
+
+  async function refreshDashboard() {
+    setHomeLoading(true);
+    setError('');
+
+    try {
+      const data = await getRecounts();
+      setActiveSummary(data.active || null);
+      setPreviousRecounts(Array.isArray(data.previous) ? data.previous : []);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось загрузить данные');
+    } finally {
+      setHomeLoading(false);
+    }
+  }
+
+  async function refreshAdminUsers() {
+    setHomeLoading(true);
+    setError('');
+    try {
+      const data = await getAdminUsers();
+      setAdminUsers(Array.isArray(data.users) ? data.users : []);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось загрузить пользователей');
+    } finally {
+      setHomeLoading(false);
+    }
+  }
+
+  async function bootstrapAuth(result) {
+    const nextToken = String(result?.token || '').trim();
+    if (!nextToken) throw new Error('Сервер не вернул токен');
+
+    localStorage.setItem(TOKEN_KEY, nextToken);
+    setAuthToken(nextToken);
+    setToken(nextToken);
+    const nextUser = result.user || null;
+    setUser(nextUser);
+
+    if (nextUser?.isAdmin) {
+      await refreshAdminUsers();
+      return;
+    }
+
+    if (!nextUser?.subscriptionActive) {
+      return;
+    }
+
+    await refreshDashboard();
+  }
+
+  async function handleAuthSubmit(event) {
+    event.preventDefault();
+    setAuthLoading(true);
+    setAuthError('');
+
+    try {
+      const action = authMode === 'register' ? register : login;
+      const result = await action(authLogin, authPassword);
+      await bootstrapAuth(result);
+      setAuthPassword('');
+    } catch (err) {
+      setAuthError(err instanceof Error ? err.message : 'Ошибка авторизации');
+    } finally {
+      setAuthLoading(false);
+    }
+  }
+
+  async function handleLogout(skipApi = false) {
+    try {
+      if (!skipApi && token) {
+        await logout();
+      }
+    } catch {
+      // no-op
+    }
+
+    stopScanner();
+    localStorage.removeItem(TOKEN_KEY);
+    setAuthToken('');
+    setToken('');
+    setUser(null);
+    setActiveSummary(null);
+    setPreviousRecounts([]);
+    setAdminUsers([]);
+    setActiveRecount(null);
+    setValues({});
+    setSearch('');
+    setMenuOpen(false);
+    setMismatchModalOpen(false);
+    setCompleteModalOpen(false);
+  }
+
+  function getItemCodes() {
+    return Array.isArray(activeRecount?.items) ? activeRecount.items.map(item => String(item.code)) : [];
+  }
+
+  async function openRecount(id) {
+    setLoading(true);
+    setError('');
+    try {
+      const data = await getRecount(id);
+      const recount = data.recount;
+      setActiveRecount(recount);
+      setValues(recount.values || {});
+      setSearch(recount.search || '');
+
+      if (recount.barcodeCache && typeof recount.barcodeCache === 'object') {
+        setBarcodeCache(prev => ({ ...prev, ...recount.barcodeCache }));
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось открыть просчет');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function reopenPreviousRecount(id) {
+    setLoading(true);
+    setError('');
+    try {
+      const data = await reopenRecount(id);
+      const recount = data.recount;
+      setActiveRecount(recount);
+      setValues(recount.values || {});
+      setSearch(recount.search || '');
+      setMenuOpen(false);
+      setMismatchModalOpen(false);
+      setCompleteModalOpen(false);
+
+      if (recount.barcodeCache && typeof recount.barcodeCache === 'object') {
+        setBarcodeCache(prev => ({ ...prev, ...recount.barcodeCache }));
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось открыть просчет из истории');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleUpload(event) {
+    const selected = event.target.files?.[0];
+    if (!selected) return;
+
+    setLoading(true);
+    setError('');
+
+    try {
+      const parsed = await createRecountFromPdf(selected);
+      const recount = parsed.recount;
+      setActiveRecount(recount);
+      setValues(recount.values || {});
+      setSearch(recount.search || '');
+      setActiveSummary(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось загрузить PDF');
+    } finally {
+      setLoading(false);
+      event.target.value = '';
+    }
+  }
+
+  async function handleSaveNow() {
+    if (!activeRecount) return;
+
+    const payload = buildProgressPayload(values, search, barcodeCache);
+    try {
+      await saveRecountProgress(activeRecount.id, payload);
+      autosaveSnapshotRef.current = JSON.stringify(payload);
+      setScannerStatus('Прогресс сохранен');
+    } catch {
+      setScannerStatus('Ошибка сохранения');
+    }
+
+    setMenuOpen(false);
+  }
+
+  async function resolveBarcodeWithCache(rawBarcode) {
+    const barcode = normalizeBarcodeValue(rawBarcode);
+    if (!barcode) {
+      return { resolved: false, code: null, source: 'empty' };
+    }
+
+    const localHit = barcodeCache[barcode];
+    if (localHit?.code) {
+      return {
+        resolved: true,
+        code: String(localHit.code),
+        source: localHit.source || 'frontend-cache'
+      };
+    }
+
+    const pending = pendingBarcodeRequestRef.current.get(barcode);
+    if (pending) {
+      return pending;
+    }
+
+    const requestPromise = resolveBarcode(barcode, getItemCodes())
+      .then(apiResult => {
+        if (apiResult?.resolved && apiResult?.code) {
+          setBarcodeCache(prev => ({
+            ...prev,
+            [barcode]: {
+              code: String(apiResult.code),
+              source: apiResult.source || 'backend'
+            }
+          }));
+        }
+        return apiResult;
+      })
+      .finally(() => {
+        pendingBarcodeRequestRef.current.delete(barcode);
+      });
+
+    pendingBarcodeRequestRef.current.set(barcode, requestPromise);
+    return requestPromise;
+  }
+
+  async function applyScannedCode(code) {
+    const now = Date.now();
+    if (!code) return;
+    if (code === lastCodeRef.current && now - lastCodeTsRef.current < 1500) return;
+
+    lastCodeRef.current = code;
+    lastCodeTsRef.current = now;
+    setLastCode(code);
+
+    try {
+      setScannerStatus('Поиск артикула...');
+      const resolved = await resolveBarcodeWithCache(code);
+      if (resolved?.resolved && resolved?.code) {
+        setSearch(String(resolved.code));
+        setScannerStatus(`Штрихкод считан (${resolved.source || 'cache'})`);
+        triggerScanSuccessFlash();
+      } else {
+        setSearch(code);
+        setScannerStatus('Артикул не найден, поиск по штрихкоду');
+      }
+    } catch {
+      setSearch(code);
+      setScannerStatus('Ошибка резолва, поиск по штрихкоду');
+    }
+
+    if (navigator.vibrate) navigator.vibrate(70);
+  }
+
+  async function scanBarcodeFrame() {
+    const video = videoRef.current;
+    const detector = detectorRef.current;
+    if (!video || !detector || !scannerOn) return;
+
+    try {
+      const codes = await detector.detect(video);
+      const code = codes[0]?.rawValue;
+      if (code) void applyScannedCode(code);
+    } catch {
+      // no-op
+    }
+
+    if (scannerOn) {
+      scanRafRef.current = requestAnimationFrame(scanBarcodeFrame);
+    }
+  }
+
+  async function startScanner() {
+    const video = videoRef.current;
+    if (!video) return;
+    if (!activeRecount?.items?.length) {
+      setScannerStatus('Сначала загрузите PDF');
+      return;
+    }
+
+    try {
+      setScannerStatus('Запуск камеры...');
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: 'environment' } },
+        audio: false
+      });
+
+      scannerStreamRef.current = stream;
+      video.srcObject = stream;
+      await video.play();
+
+      if (supportsBarcodeDetector()) {
+        detectorRef.current = new window.BarcodeDetector({ formats: ['code_128', 'ean_13', 'ean_8'] });
+        setScannerOn(true);
+        setScannerStatus('Наведите на штрихкод');
+        scanRafRef.current = requestAnimationFrame(scanBarcodeFrame);
+        return;
+      }
+
+      const zxing = await import('@zxing/browser');
+      const reader = new zxing.BrowserMultiFormatReader();
+      zxingReaderRef.current = reader;
+      const controls = await reader.decodeFromVideoDevice(undefined, video, resultObj => {
+        if (resultObj) void applyScannedCode(resultObj.getText());
+      });
+      zxingControlsRef.current = controls;
+      setScannerOn(true);
+      setScannerStatus('Наведите на штрихкод');
+    } catch {
+      setScannerStatus('Не удалось запустить сканер');
+      stopScanner();
+    }
+  }
+
+  function stopScanner() {
+    setScannerOn(false);
+    setTorchOn(false);
+    setScannerStatus('Сканер выключен');
+
+    if (scanRafRef.current) {
+      cancelAnimationFrame(scanRafRef.current);
+      scanRafRef.current = 0;
+    }
+
+    zxingControlsRef.current?.stop?.();
+    zxingControlsRef.current = null;
+    zxingReaderRef.current?.reset?.();
+    zxingReaderRef.current = null;
+    detectorRef.current = null;
+
+    const stream = scannerStreamRef.current;
+    if (stream) {
+      stream.getTracks().forEach(track => track.stop());
+      scannerStreamRef.current = null;
+    }
+
+    const video = videoRef.current;
+    if (video?.srcObject) {
+      video.srcObject = null;
+    }
+  }
+
+  async function toggleScanner() {
+    if (scannerOn) {
+      stopScanner();
+      return;
+    }
+    await startScanner();
+  }
+
+  async function toggleTorch() {
+    const stream = scannerStreamRef.current;
+    if (!stream) {
+      setScannerStatus('Сначала включите сканер');
+      return;
+    }
+
+    const track = stream.getVideoTracks()[0];
+    if (!track) return;
+
+    try {
+      const next = !torchOn;
+      await track.applyConstraints({ advanced: [{ torch: next }] });
+      setTorchOn(next);
+    } catch {
+      setScannerStatus('Фонарик не поддерживается');
+    }
+  }
+
+  function updateFact(code, nextValue) {
+    const normalized = sanitizeFactExpression(nextValue);
+    setValues(prev => ({
+      ...prev,
+      [code]: normalized
+    }));
+  }
+
+  function handleFactFocus(code) {
+    setActiveFactCode(code);
+  }
+
+  function handleFactBlur() {
+    setActiveFactCode('');
+  }
+
+  function appendToActiveFact(char) {
+    if (!activeFactCode) return;
+    const current = String(values[activeFactCode] ?? '');
+    if (char === '+') {
+      if (!current || current.endsWith('+')) return;
+      updateFact(activeFactCode, `${current}+`);
+      return;
+    }
+
+    if (/^\d$/.test(char)) {
+      updateFact(activeFactCode, `${current}${char}`);
+    }
+  }
+
+  function eraseActiveFact() {
+    if (!activeFactCode) return;
+    const current = String(values[activeFactCode] ?? '');
+    updateFact(activeFactCode, current.slice(0, -1));
+  }
+
+  async function handleCompleteRecount() {
+    if (!activeRecount) return;
+
+    setLoading(true);
+    setError('');
+
+    try {
+      const progressPayload = buildProgressPayload(values, search, barcodeCache);
+      const result = await completeRecount(activeRecount.id, {
+        ...progressPayload,
+        counterName,
+        groupName,
+        includeTotalSummary
+      });
+
+      const url = URL.createObjectURL(result.blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = result.fileName;
+      link.click();
+      URL.revokeObjectURL(url);
+
+      setCompleteModalOpen(false);
+      setCounterName('');
+      setGroupName('');
+
+      stopScanner();
+      setActiveRecount(null);
+      await refreshDashboard();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось завершить просчет');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function goHome() {
+    stopScanner();
+    setActiveRecount(null);
+    setMenuOpen(false);
+    setMismatchModalOpen(false);
+    setCompleteModalOpen(false);
+    await refreshDashboard();
+  }
+
+  async function activateSubscriptionForUser(targetUserId) {
+    const parsedDays = Number.parseInt(activationDays, 10);
+    const days = Number.isFinite(parsedDays) ? Math.max(1, Math.min(parsedDays, 3650)) : 30;
+
+    setActivatingUserId(targetUserId);
+    setError('');
+    try {
+      await activateUserSubscription(targetUserId, { days });
+      await refreshAdminUsers();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось активировать подписку');
+    } finally {
+      setActivatingUserId('');
+    }
+  }
+
+  if (!token) {
+    return (
+      <div className="auth-page">
+        <form className="auth-card" onSubmit={handleAuthSubmit}>
+          <h1>Локалка</h1>
+          <p>{authMode === 'login' ? 'Вход в систему' : 'Регистрация пользователя'}</p>
+
+          <input
+            value={authLogin}
+            onChange={event => setAuthLogin(event.target.value)}
+            placeholder="Логин"
+            autoComplete="username"
+            required
+          />
+          <input
+            value={authPassword}
+            onChange={event => setAuthPassword(event.target.value)}
+            placeholder="Пароль"
+            type="password"
+            autoComplete={authMode === 'login' ? 'current-password' : 'new-password'}
+            required
+          />
+
+          {authError ? <div className="status error">{authError}</div> : null}
+
+          <button type="submit" disabled={authLoading}>
+            {authLoading ? 'Подождите...' : authMode === 'login' ? 'Войти' : 'Зарегистрироваться'}
+          </button>
+
+          <button
+            type="button"
+            className="ghost"
+            onClick={() => {
+              setAuthError('');
+              setAuthMode(prev => (prev === 'login' ? 'register' : 'login'));
+            }}
+          >
+            {authMode === 'login' ? 'Создать аккаунт' : 'У меня уже есть аккаунт'}
+          </button>
+        </form>
+      </div>
+    );
+  }
+
+  if (user?.isAdmin) {
+    return (
+      <div className="home-page">
+        <header className="home-header">
+          <div>
+            <h2>Админ-панель</h2>
+            <p>Пользователь: {user?.login || '-'}</p>
+          </div>
+          <button type="button" onClick={() => handleLogout()} className="ghost">Выйти</button>
+        </header>
+
+        {error ? <section className="status error">{error}</section> : null}
+
+        <section className="panel">
+          <h3>Пользователи</h3>
+          <div className="admin-actions-row">
+            <label className="admin-days-input">
+              Дней активации
+              <input
+                type="number"
+                min="1"
+                max="3650"
+                value={activationDays}
+                onChange={event => setActivationDays(event.target.value)}
+              />
+            </label>
+            <button type="button" className="ghost" onClick={refreshAdminUsers} disabled={homeLoading}>
+              Обновить список
+            </button>
+          </div>
+
+          {homeLoading ? <div className="status">Загрузка...</div> : null}
+
+          {!homeLoading ? (
+            <div className="admin-users-list">
+              {adminUsers.map(item => (
+                <article key={item.id} className="admin-user-card">
+                  <div className="admin-user-main">
+                    <div className="admin-user-login">{item.login}</div>
+                    <div className="line mini">Статус: {formatSubscriptionStatusLabel(item)}</div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => activateSubscriptionForUser(item.id)}
+                    disabled={item.isAdmin || activatingUserId === item.id}
+                  >
+                    {activatingUserId === item.id ? 'Активация...' : 'Активировать'}
+                  </button>
+                </article>
+              ))}
+              {!adminUsers.length ? <div className="status">Пользователи не найдены</div> : null}
+            </div>
+          ) : null}
+        </section>
+      </div>
+    );
+  }
+
+  if (user && !user.subscriptionActive) {
+    return (
+      <div className="auth-page">
+        <section className="auth-card">
+          <h1>Подписка не активна</h1>
+          <p>
+            Для доступа к сервису нужна активная подписка.
+            Обратитесь к администратору для активации аккаунта.
+          </p>
+          <div className="status">Статус: {formatSubscriptionStatusLabel(user)}</div>
+          <button type="button" className="ghost" onClick={() => handleLogout()}>
+            Выйти
+          </button>
+        </section>
+      </div>
+    );
+  }
+
+  if (!activeRecount) {
+    return (
+      <div className="home-page">
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="application/pdf"
+          onChange={handleUpload}
+          className="hidden-file"
+        />
+
+        <header className="home-header">
+          <div>
+            <h2>Локалка</h2>
+            <p>Пользователь: {user?.login || '-'}</p>
+          </div>
+          <button type="button" onClick={() => handleLogout()} className="ghost">Выйти</button>
+        </header>
+
+        {error ? <section className="status error">{error}</section> : null}
+
+        <section className="panel">
+          <h3>Активный просчет</h3>
+          {homeLoading ? <div className="status">Загрузка...</div> : null}
+
+          {!homeLoading && activeSummary ? (
+            <div className="compact-card">
+              <div>Документ: {activeSummary.docId}</div>
+              <div>Позиции: {activeSummary.totalItems}</div>
+              <div>Расхождения: {activeSummary.mismatchCount}</div>
+              <button type="button" onClick={() => openRecount(activeSummary.id)}>Продолжить</button>
+            </div>
+          ) : null}
+
+          {!homeLoading && !activeSummary ? (
+            <div className="compact-card">
+              <div>Для начала нового просчета загрузите PDF-файл</div>
+              <button type="button" onClick={() => fileInputRef.current?.click()} disabled={loading}>
+                {loading ? 'Загрузка...' : 'Загрузить .PDF'}
+              </button>
+            </div>
+          ) : null}
+        </section>
+
+        <section className="panel">
+          <h3>Завершенные локалки</h3>
+          {!previousRecounts.length ? <div className="status">История пустая</div> : null}
+          <div className="history-list">
+            {previousRecounts.map(item => (
+              <article key={item.id} className="history-item">
+                <div className="history-item-head">
+                  <div>{item.groupName || 'Без названия группы'}</div>
+                  <button
+                    type="button"
+                    className="history-eye-btn"
+                    title="Открыть для доработки"
+                    aria-label="Открыть для доработки"
+                    onClick={() => reopenPreviousRecount(item.id)}
+                    disabled={loading}
+                  >
+                    👁
+                  </button>
+                </div>
+                <div className="line mini">Итог: {formatRub(item.totalSumRub)}</div>
+                <div className="line mini">Дата начала: {formatStartDate(item.createdAt)}</div>
+                <div className="line mini">Просчитывающий: {item.counterName || '-'}</div>
+              </article>
+            ))}
+          </div>
+        </section>
+      </div>
+    );
+  }
+
+  return (
+    <div className="recount-page">
+      <div className="recount-top">
+        <header className={`scanner-shell ${scanSuccessFlash ? 'scan-success-flash' : ''}`}>
+          <div className={`scanner-viewport ${scannerOn ? 'active' : ''}`}>
+            <video ref={videoRef} autoPlay muted playsInline />
+            <div className="scanner-guide" />
+          </div>
+          <div className="scanner-meta">
+            <span>{loading ? 'Подождите...' : scannerStatus}</span>
+            <span className="scanner-last">{lastCode || `Документ: ${activeRecount.docId}`}</span>
+          </div>
+        </header>
+
+        <section className="search-block">
+          <input
+            value={search}
+            onChange={event => setSearch(event.target.value)}
+            placeholder="Поиск по артикулу или названию"
+          />
+        </section>
+
+        {error ? <section className="status error">{error}</section> : null}
+      </div>
+
+      <main className={`items-feed ${activeFactCode ? 'keypad-open' : ''}`}>
+        {filteredItems.map(item => {
+          const row = computeRowState(item, values);
+          const packageType = detectPackageType(item.name);
+
+          return (
+            <article key={item.code} className={`item-card ${row.status}`}>
+              <div className="line"><strong>Артикул:</strong> {item.code}</div>
+              <div className="line"><strong>Название:</strong> {item.name}</div>
+              <div className="line mini">
+                <strong>Ед:</strong>{' '}
+                <span
+                  className={`pack-icon ${packageType}`}
+                  title={getPackageTypeLabel(packageType)}
+                  aria-label={getPackageTypeLabel(packageType)}
+                />
+                <span>{item.unit || '—'}</span>
+                {' '}| <strong>Цена:</strong> {item.price ?? '—'}
+              </div>
+              <div className="line mini"><strong>По документам:</strong> {item.docQty ?? '—'} | <strong>Разница:</strong> {row.delta === null ? '—' : row.delta}</div>
+              <input
+                className={`fact-input ${activeFactCode === item.code ? 'active' : ''}`}
+                value={row.raw}
+                onChange={event => updateFact(item.code, event.target.value)}
+                onFocus={() => handleFactFocus(item.code)}
+                onClick={() => handleFactFocus(item.code)}
+                onBlur={handleFactBlur}
+                readOnly
+                type="text"
+                inputMode="none"
+                pattern="[0-9+]*"
+                placeholder="Фактическое количество"
+              />
+            </article>
+          );
+        })}
+      </main>
+
+      <div className={`menu-popup ${menuOpen ? 'open' : ''}`}>
+        <button type="button" onClick={handleSaveNow}>Сохранить сейчас</button>
+        <button type="button" onClick={() => {
+          setMismatchModalOpen(true);
+          setMenuOpen(false);
+        }}>
+          Расхождения ({mismatchItems.length})
+        </button>
+        <button type="button" onClick={() => {
+          setCompleteModalOpen(true);
+          setMenuOpen(false);
+        }}>
+          Завершить
+        </button>
+        <button type="button" onClick={goHome}>На главный</button>
+      </div>
+
+      <nav className="bottom-actions">
+        <button type="button" className={scannerOn ? 'active' : ''} onClick={toggleScanner}>Сканер</button>
+        <button type="button" className={torchOn ? 'active' : ''} onClick={toggleTorch}>Фонарик</button>
+        <button type="button" className={menuOpen ? 'active' : ''} onClick={() => setMenuOpen(prev => !prev)}>Меню</button>
+      </nav>
+
+      {activeFactCode ? (
+        <div className="fact-keypad">
+          <div className="fact-keypad-grid">
+            <button type="button" onMouseDown={event => event.preventDefault()} onClick={() => appendToActiveFact('1')}>1</button>
+            <button type="button" onMouseDown={event => event.preventDefault()} onClick={() => appendToActiveFact('2')}>2</button>
+            <button type="button" onMouseDown={event => event.preventDefault()} onClick={() => appendToActiveFact('3')}>3</button>
+            <button type="button" onMouseDown={event => event.preventDefault()} onClick={() => appendToActiveFact('4')}>4</button>
+            <button type="button" onMouseDown={event => event.preventDefault()} onClick={() => appendToActiveFact('5')}>5</button>
+            <button type="button" onMouseDown={event => event.preventDefault()} onClick={() => appendToActiveFact('6')}>6</button>
+            <button type="button" onMouseDown={event => event.preventDefault()} onClick={() => appendToActiveFact('7')}>7</button>
+            <button type="button" onMouseDown={event => event.preventDefault()} onClick={() => appendToActiveFact('8')}>8</button>
+            <button type="button" onMouseDown={event => event.preventDefault()} onClick={() => appendToActiveFact('9')}>9</button>
+            <button type="button" onMouseDown={event => event.preventDefault()} onClick={() => appendToActiveFact('+')}>+</button>
+            <button type="button" onMouseDown={event => event.preventDefault()} onClick={() => appendToActiveFact('0')}>0</button>
+            <button type="button" onMouseDown={event => event.preventDefault()} onClick={eraseActiveFact}>⌫</button>
+          </div>
+        </div>
+      ) : null}
+
+      {mismatchModalOpen ? (
+        <div className="modal-backdrop" onClick={() => setMismatchModalOpen(false)}>
+          <div className="modal-card" onClick={event => event.stopPropagation()}>
+            <h3>Позиции с расхождениями</h3>
+            {!mismatchItems.length ? <div className="status">Расхождений нет</div> : null}
+            {mismatchItems.length ? (
+              <div className="compact-table-wrap">
+                <table className="compact-table">
+                  <colgroup>
+                    <col className="col-name" />
+                    <col className="col-num" />
+                    <col className="col-num" />
+                    <col className="col-num" />
+                  </colgroup>
+                  <thead>
+                    <tr>
+                      <th>Название</th>
+                      <th>Остаток</th>
+                      <th>Факт</th>
+                      <th>Разница</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {mismatchItems.map(item => {
+                      const factClass = item.delta === null ? 'num-neutral' : item.delta < 0 ? 'num-negative' : 'num-positive';
+                      const deltaClass = item.delta === null ? 'num-neutral' : item.delta < 0 ? 'num-negative' : 'num-positive';
+                      const deltaText = item.delta === null ? '-' : `${item.delta > 0 ? '+' : ''}${item.delta}`;
+                      const factText = item.fact === null ? '-' : String(item.fact);
+
+                      return (
+                        <tr key={item.code}>
+                          <td className="cell-name">{item.name}</td>
+                          <td>{item.docQty ?? '-'}</td>
+                          <td className={factClass}>{factText}</td>
+                          <td className={deltaClass}>{deltaText}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            ) : null}
+            <button type="button" onClick={() => setMismatchModalOpen(false)}>Закрыть</button>
+          </div>
+        </div>
+      ) : null}
+
+      {completeModalOpen ? (
+        <div className="modal-backdrop" onClick={() => setCompleteModalOpen(false)}>
+          <div className="modal-card" onClick={event => event.stopPropagation()}>
+            <h3>Завершение просчета</h3>
+            <input
+              value={counterName}
+              onChange={event => setCounterName(event.target.value)}
+              placeholder="Просчитывающий"
+            />
+            <input
+              value={groupName}
+              onChange={event => setGroupName(event.target.value)}
+              placeholder="Товарная группа"
+            />
+            <label className="checkbox-row">
+              <input
+                type="checkbox"
+                checked={includeTotalSummary}
+                onChange={event => setIncludeTotalSummary(event.target.checked)}
+              />
+              Показать общую сумму (+/-)
+            </label>
+            <button type="button" onClick={handleCompleteRecount} disabled={loading}>Скачать итоговый PDF и завершить</button>
+            <button type="button" className="ghost" onClick={() => setCompleteModalOpen(false)}>Отмена</button>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
