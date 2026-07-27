@@ -666,7 +666,10 @@ function configurePdfFont(doc) {
 }
 
 function drawCell(doc, x, y, width, height, text, options = {}) {
+  doc.save();
+  doc.lineWidth(0.3);
   doc.rect(x, y, width, height).stroke();
+  doc.restore();
   doc.fontSize(options.fontSize || 7);
   doc.text(String(text ?? ''), x + 2, y + 2, {
     width: width - 4,
@@ -736,24 +739,77 @@ async function buildPdfBufferFromRecount(recount, options) {
   doc.fontSize(10).text(`от ${formatRuDate(new Date())} г.`, { align: 'center' });
   doc.moveDown(0.3);
 
-  doc.fontSize(9).text('Проверка осуществлялась комиссией в составе:');
-  doc.fontSize(9).text(String(options.counterName || '-'));
-  doc.fontSize(9).text(`+ ${formatMoney(tableData.plusSum)}`);
-  doc.fontSize(9).text(`- ${formatMoney(tableData.minusSum)}`);
-  if (includeTotalSummary) {
-    doc.fontSize(9).text(`Итого: ${formatMoney(tableData.totalSum)}`);
-  }
-  doc.moveDown(0.2);
+  const summaryTopY = doc.y + 8;
+  const pageInnerWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
+  const leftSummaryWidth = Math.floor(pageInnerWidth * 0.55);
+  const rightSummaryX = doc.page.margins.left + leftSummaryWidth + 10;
+  const rightSummaryWidth = pageInnerWidth - leftSummaryWidth - 10;
 
-  const storeLabel = recount.storeLabel || '№____ (адрес не определен)';
-  doc.fontSize(9).text(`По магазину: ${storeLabel}`, { continued: true });
-  doc.text(`  Просчет с ${formatRuTime(createdAt)} по ${formatRuTime(completedAt)}`, { align: 'right' });
+  doc.fontSize(9).text(`- ${formatMoney(tableData.minusSum)}`, doc.page.margins.left, summaryTopY, {
+    width: leftSummaryWidth,
+    align: 'left'
+  });
+  doc.fontSize(9).text(`+ ${formatMoney(tableData.plusSum)}`, doc.page.margins.left, summaryTopY + 12, {
+    width: leftSummaryWidth,
+    align: 'left'
+  });
+
+  let summaryBottomY = summaryTopY + 24;
+  if (includeTotalSummary) {
+    doc.fontSize(9).text(`Итого: ${formatMoney(tableData.totalSum)}`, doc.page.margins.left, summaryTopY + 24, {
+      width: leftSummaryWidth,
+      align: 'left'
+    });
+    summaryBottomY = summaryTopY + 36;
+  }
+
+  const counterLineY = includeTotalSummary ? summaryTopY + 16 : summaryTopY + 8;
+  doc.fontSize(9).text(`Считал: ${String(options.counterName || '-')}`, rightSummaryX, counterLineY, {
+    width: rightSummaryWidth,
+    align: 'left'
+  });
+
+  const signLineStartX = rightSummaryX + 52;
+  const signLineEndX = rightSummaryX + rightSummaryWidth;
+  const firstSignLineY = counterLineY + 14;
+  const secondSignLineY = counterLineY + 30;
+
+  doc.save();
+  doc.lineWidth(0.6);
+  doc.moveTo(signLineStartX, firstSignLineY).lineTo(signLineEndX, firstSignLineY).stroke();
+  doc.moveTo(signLineStartX, secondSignLineY).lineTo(signLineEndX, secondSignLineY).stroke();
+  doc.restore();
+
+  doc.y = Math.max(summaryBottomY + 6, secondSignLineY) + 6;
 
   const tableLeft = doc.page.margins.left;
+  const tableWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
+
+  const storeLabel = recount.storeLabel || '№____ (адрес не определен)';
+  const storeText = `По магазину: ${storeLabel}`;
+  const timeText = `Просчет с ${formatRuTime(createdAt)} по ${formatRuTime(completedAt)}`;
+  const storeInfoY = doc.y;
+  const rightInfoWidth = 190;
+  const leftInfoWidth = tableWidth - rightInfoWidth - 8;
+
+  doc.fontSize(9).text(storeText, tableLeft, storeInfoY, {
+    width: leftInfoWidth,
+    align: 'left'
+  });
+  doc.text(timeText, tableLeft + leftInfoWidth + 8, storeInfoY, {
+    width: rightInfoWidth,
+    align: 'right'
+  });
+
+  const storeBlockHeight = Math.max(
+    doc.heightOfString(storeText, { width: leftInfoWidth }),
+    doc.heightOfString(timeText, { width: rightInfoWidth })
+  );
+  doc.y = storeInfoY + storeBlockHeight;
+
   const tableTopStart = doc.y + 6;
   const headerHeight = 16;
   const rowHeight = 12;
-  const tableWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
 
   const columns = [
     { key: 'index', title: '№', width: 18, align: 'center' },
@@ -799,9 +855,19 @@ async function buildPdfBufferFromRecount(recount, options) {
     y += rowHeight;
   }
 
-  doc.y = y + 8;
-  doc.fontSize(9).text('Члены комиссии:');
-  doc.fontSize(9).text(String(options.counterName || '-'));
+  doc.y = y + 14;
+  const footerLineLeft = doc.page.margins.left + 120;
+  const footerLineRight = doc.page.width - doc.page.margins.right;
+  const footerFirstLineY = doc.y;
+
+  doc.save();
+  doc.lineWidth(0.6);
+  doc.moveTo(footerLineLeft, footerFirstLineY).lineTo(footerLineRight, footerFirstLineY).stroke();
+  doc.moveTo(footerLineLeft, footerFirstLineY + 18).lineTo(footerLineRight, footerFirstLineY + 18).stroke();
+  doc.moveTo(footerLineLeft, footerFirstLineY + 36).lineTo(footerLineRight, footerFirstLineY + 36).stroke();
+  doc.restore();
+
+  doc.y = footerFirstLineY + 42;
 
   doc.end();
   return done;

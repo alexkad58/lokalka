@@ -9,12 +9,14 @@
     "dev:client": "npm run dev --prefix client",
     "start": "npm run start --prefix server",
     "build": "npm run build --prefix client",
+    "generate:sample": "node index.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "author": "alexkad58",
   "license": "ISC",
   "description": "",
   "dependencies": {
-    "concurrently": "^9.2.1"
+    "concurrently": "^9.2.1",
+    "pdfkit": "^0.19.1"
   }
 }

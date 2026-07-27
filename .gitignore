@@ -8,3 +8,4 @@ server/storage.json
 *.log
 .DS_Store
 Thumbs.db
+.local/
