@@ -3,6 +3,7 @@ import {
   activateUserSubscription,
   completeRecount,
   createRecountFromPdf,
+  getAdminLogs,
   getAdminUsers,
   getRecount,
   getRecounts,
@@ -19,6 +20,14 @@ import {
 const TOKEN_KEY = 'lokalka_auth_token';
 const BARCODE_CACHE_STORAGE_KEY = 'barcode_article_cache_v1';
 const AUTOSAVE_INTERVAL_MS = 8000;
+const ADMIN_LOG_LEVEL_TABS = [
+  { key: 'all', label: 'Все' },
+  { key: 'error', label: 'Ошибки' },
+  { key: 'warn', label: 'Предупр.' },
+  { key: 'info', label: 'Инфо' },
+  { key: 'debug', label: 'Debug' },
+  { key: 'trace', label: 'Trace' }
+];
 
 function normalizeQuery(value) {
   return String(value || '')
@@ -59,6 +68,22 @@ function formatStartDate(value) {
   const date = new Date(value || '');
   if (Number.isNaN(date.getTime())) return '-';
   return date.toLocaleDateString('ru-RU');
+}
+
+function formatLogDateTime(value) {
+  const date = new Date(value || '');
+  if (Number.isNaN(date.getTime())) return '-';
+  return date.toLocaleString('ru-RU');
+}
+
+function formatLogLevel(level) {
+  const normalized = String(level || '').toLowerCase();
+  if (normalized === 'error') return 'ERROR';
+  if (normalized === 'warn') return 'WARN';
+  if (normalized === 'debug') return 'DEBUG';
+  if (normalized === 'trace') return 'TRACE';
+  if (normalized === 'fatal') return 'FATAL';
+  return 'INFO';
 }
 
 function safeNumber(value) {
@@ -125,6 +150,10 @@ export default function App() {
   const [activeSummary, setActiveSummary] = useState(null);
   const [previousRecounts, setPreviousRecounts] = useState([]);
   const [adminUsers, setAdminUsers] = useState([]);
+  const [adminLogLevel, setAdminLogLevel] = useState('all');
+  const [adminLogEntries, setAdminLogEntries] = useState([]);
+  const [adminLogCounts, setAdminLogCounts] = useState({});
+  const [adminLogLoading, setAdminLogLoading] = useState(false);
   const [activationDays, setActivationDays] = useState('30');
   const [activatingUserId, setActivatingUserId] = useState('');
 
@@ -185,7 +214,7 @@ export default function App() {
         setUser(nextUser);
 
         if (nextUser?.isAdmin) {
-          return refreshAdminUsers();
+          return Promise.all([refreshAdminUsers(), refreshAdminLogs('all')]);
         }
         if (!nextUser?.subscriptionActive) {
           setActiveRecount(null);
@@ -312,6 +341,21 @@ export default function App() {
     }
   }
 
+  async function refreshAdminLogs(level = adminLogLevel) {
+    setAdminLogLoading(true);
+    setError('');
+    try {
+      const data = await getAdminLogs(level, 250);
+      setAdminLogLevel(data?.selectedLevel || level);
+      setAdminLogEntries(Array.isArray(data?.entries) ? data.entries : []);
+      setAdminLogCounts(data?.levelCounts && typeof data.levelCounts === 'object' ? data.levelCounts : {});
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось загрузить логи');
+    } finally {
+      setAdminLogLoading(false);
+    }
+  }
+
   async function bootstrapAuth(result) {
     const nextToken = String(result?.token || '').trim();
     if (!nextToken) throw new Error('Сервер не вернул токен');
@@ -323,7 +367,7 @@ export default function App() {
     setUser(nextUser);
 
     if (nextUser?.isAdmin) {
-      await refreshAdminUsers();
+      await Promise.all([refreshAdminUsers(), refreshAdminLogs('all')]);
       return;
     }
 
@@ -368,6 +412,9 @@ export default function App() {
     setActiveSummary(null);
     setPreviousRecounts([]);
     setAdminUsers([]);
+    setAdminLogLevel('all');
+    setAdminLogEntries([]);
+    setAdminLogCounts({});
     setActiveRecount(null);
     setValues({});
     setSearch('');
@@ -836,6 +883,65 @@ export default function App() {
                 </article>
               ))}
               {!adminUsers.length ? <div className="status">Пользователи не найдены</div> : null}
+            </div>
+          ) : null}
+        </section>
+
+        <section className="panel">
+          <h3>Логи сервера</h3>
+
+          <div className="admin-logs-toolbar">
+            <div className="admin-log-tabs">
+              {ADMIN_LOG_LEVEL_TABS.map(tab => {
+                const key = tab.key;
+                const count = key === 'all'
+                  ? Object.values(adminLogCounts || {}).reduce((acc, value) => acc + Number(value || 0), 0)
+                  : Number(adminLogCounts?.[key] || 0);
+                const isActive = adminLogLevel === key;
+
+                return (
+                  <button
+                    key={key}
+                    type="button"
+                    className={`admin-log-tab ${isActive ? 'active' : ''}`}
+                    onClick={() => refreshAdminLogs(key)}
+                    disabled={adminLogLoading}
+                  >
+                    {tab.label} ({count})
+                  </button>
+                );
+              })}
+            </div>
+
+            <button type="button" className="ghost" onClick={() => refreshAdminLogs(adminLogLevel)} disabled={adminLogLoading}>
+              {adminLogLoading ? 'Загрузка...' : 'Обновить логи'}
+            </button>
+          </div>
+
+          {adminLogLoading ? <div className="status">Загрузка логов...</div> : null}
+
+          {!adminLogLoading ? (
+            <div className="admin-log-list">
+              {adminLogEntries.map(entry => (
+                <article key={entry.id} className="admin-log-item">
+                  <div className="admin-log-item-head">
+                    <span className={`admin-log-level ${String(entry.level || 'info').toLowerCase()}`}>
+                      {formatLogLevel(entry.level)}
+                    </span>
+                    <span className="line mini">{formatLogDateTime(entry.ts)}</span>
+                  </div>
+                  <div className="admin-log-event">{entry.event || '-'}</div>
+                  <div className="line mini">
+                    Пользователь: {entry.actorLogin || '-'} | IP: {entry.ip || '-'}
+                  </div>
+                  <details>
+                    <summary>Детали</summary>
+                    <pre className="admin-log-meta">{JSON.stringify(entry.meta || {}, null, 2)}</pre>
+                  </details>
+                </article>
+              ))}
+
+              {!adminLogEntries.length ? <div className="status">Логи пока отсутствуют</div> : null}
             </div>
           ) : null}
         </section>

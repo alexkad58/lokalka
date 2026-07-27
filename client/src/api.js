@@ -58,6 +58,17 @@ export async function getAdminUsers() {
   return readJsonOrThrow(response, 'Не удалось загрузить пользователей');
 }
 
+export async function getAdminLogs(level = 'all', limit = 200) {
+  const params = new URLSearchParams();
+  params.set('level', String(level || 'all'));
+  params.set('limit', String(limit));
+
+  const response = await fetch(`/api/admin/logs?${params.toString()}`, {
+    headers: authHeaders()
+  });
+  return readJsonOrThrow(response, 'Не удалось загрузить логи');
+}
+
 export async function activateUserSubscription(userId, payload = {}) {
   const response = await fetch(`/api/admin/users/${encodeURIComponent(userId)}/subscription`, {
     method: 'POST',

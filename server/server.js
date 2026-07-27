@@ -34,6 +34,9 @@ const db = {
 };
 
 const sessions = new Map();
+const MAX_AUDIT_LOGS = Number.parseInt(process.env.MAX_AUDIT_LOGS || '2000', 10);
+const auditLogs = [];
+const KNOWN_LOG_LEVELS = ['all', 'error', 'warn', 'info', 'debug', 'trace', 'fatal'];
 
 const SHOP_API_URL = process.env.SHOP_API_URL || '';
 const SHOP_API_METHOD = (process.env.SHOP_API_METHOD || 'GET').toUpperCase();
@@ -57,6 +60,97 @@ function createId(prefix) {
 
 function toIsoNow() {
   return new Date().toISOString();
+}
+
+function sanitizeLogLevel(level) {
+  const normalized = String(level || '').trim().toLowerCase();
+  if (KNOWN_LOG_LEVELS.includes(normalized) && normalized !== 'all') {
+    return normalized;
+  }
+  return 'info';
+}
+
+function clipLogString(value, maxLength = 300) {
+  const text = String(value || '');
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, maxLength)}...`;
+}
+
+function sanitizeLogMetaValue(value, depth = 0) {
+  if (value === null || value === undefined) return value;
+  if (typeof value === 'string') return clipLogString(value);
+  if (typeof value === 'number' || typeof value === 'boolean') return value;
+  if (depth >= 2) return '[depth-limit]';
+
+  if (Array.isArray(value)) {
+    return value.slice(0, 25).map(item => sanitizeLogMetaValue(item, depth + 1));
+  }
+
+  if (typeof value === 'object') {
+    const result = {};
+    for (const [key, item] of Object.entries(value).slice(0, 40)) {
+      result[key] = sanitizeLogMetaValue(item, depth + 1);
+    }
+    return result;
+  }
+
+  return clipLogString(value);
+}
+
+function sanitizeLogMeta(meta) {
+  if (!meta || typeof meta !== 'object') return {};
+  const result = {};
+  for (const [key, value] of Object.entries(meta)) {
+    if (value === undefined) continue;
+    result[key] = sanitizeLogMetaValue(value);
+  }
+  return result;
+}
+
+function getRequestIp(request) {
+  const forwarded = String(request?.headers?.['x-forwarded-for'] || '').trim();
+  if (forwarded) {
+    return forwarded.split(',')[0].trim();
+  }
+  return request?.ip || null;
+}
+
+function appendAuditLog(level, event, vars = {}) {
+  const meta = sanitizeLogMeta(vars);
+  const entry = {
+    id: createId('log'),
+    ts: toIsoNow(),
+    level,
+    event: String(event || 'unknown-event'),
+    actorLogin: typeof meta.actorLogin === 'string' ? meta.actorLogin : null,
+    actorId: typeof meta.actorId === 'string' ? meta.actorId : null,
+    path: typeof meta.path === 'string' ? meta.path : null,
+    method: typeof meta.method === 'string' ? meta.method : null,
+    ip: typeof meta.ip === 'string' ? meta.ip : null,
+    meta
+  };
+
+  auditLogs.push(entry);
+
+  const maxSize = Number.isFinite(MAX_AUDIT_LOGS) && MAX_AUDIT_LOGS > 100
+    ? MAX_AUDIT_LOGS
+    : 2000;
+
+  if (auditLogs.length > maxSize) {
+    auditLogs.splice(0, auditLogs.length - maxSize);
+  }
+}
+
+function buildRequestLogMeta(request, extra = {}) {
+  return {
+    actorId: request?.user?.id || null,
+    actorLogin: request?.user?.login || null,
+    actorIsAdmin: Boolean(request?.user?.isAdmin),
+    method: request?.method || null,
+    path: request?.url || null,
+    ip: getRequestIp(request),
+    ...extra
+  };
 }
 
 function normalizeLogin(value) {
@@ -205,6 +299,11 @@ async function authenticate(request, reply) {
   const user = userId ? db.users.find(item => item.id === userId) : null;
 
   if (!user) {
+    logEvent('warn', 'auth-required', {
+      method: request.method,
+      path: request.url,
+      ip: getRequestIp(request)
+    });
     reply.code(401).send({ ok: false, error: 'Требуется авторизация' });
     return;
   }
@@ -217,6 +316,10 @@ async function requireServiceAccess(request, reply) {
   if (request.user?.isAdmin) return;
   if (hasActiveSubscription(request.user)) return;
 
+  logEvent('warn', 'service-access-denied', buildRequestLogMeta(request, {
+    subscriptionUntil: request.user?.subscriptionUntil || null
+  }));
+
   reply.code(403).send({
     ok: false,
     code: 'SUBSCRIPTION_REQUIRED',
@@ -226,6 +329,7 @@ async function requireServiceAccess(request, reply) {
 
 async function requireAdmin(request, reply) {
   if (request.user?.isAdmin) return;
+  logEvent('warn', 'admin-access-denied', buildRequestLogMeta(request));
   reply.code(403).send({ ok: false, error: 'Доступ только для администратора' });
 }
 
@@ -497,7 +601,14 @@ async function buildPdfBufferFromRecount(recount, options) {
 }
 
 function logEvent(level, event, vars = {}) {
-  app.log[level]({ event, ...vars });
+  const normalizedLevel = sanitizeLogLevel(level);
+  const payload = vars && typeof vars === 'object' ? vars : { value: vars };
+  appendAuditLog(normalizedLevel, event, payload);
+
+  const logger = typeof app.log?.[normalizedLevel] === 'function'
+    ? app.log[normalizedLevel]
+    : app.log.info;
+  logger.call(app.log, { event, ...payload });
 }
 
 function logShopApiStartupConfig() {
@@ -1087,14 +1198,28 @@ app.post('/api/auth/register', async (request, reply) => {
   const password = String(body.password || '');
 
   if (login.length < 3) {
+    logEvent('warn', 'register-invalid-login', {
+      login,
+      loginLength: login.length,
+      ip: getRequestIp(request)
+    });
     return reply.code(400).send({ ok: false, error: 'Логин должен быть не короче 3 символов' });
   }
 
   if (password.length < 4) {
+    logEvent('warn', 'register-invalid-password', {
+      login,
+      passwordLength: password.length,
+      ip: getRequestIp(request)
+    });
     return reply.code(400).send({ ok: false, error: 'Пароль должен быть не короче 4 символов' });
   }
 
   if (db.users.some(user => user.login === login)) {
+    logEvent('warn', 'register-duplicate-login', {
+      login,
+      ip: getRequestIp(request)
+    });
     return reply.code(409).send({ ok: false, error: 'Пользователь уже существует' });
   }
 
@@ -1109,6 +1234,12 @@ app.post('/api/auth/register', async (request, reply) => {
 
   db.users.push(user);
   await saveDb();
+
+  logEvent('info', 'register-success', {
+    login: user.login,
+    userId: user.id,
+    ip: getRequestIp(request)
+  });
 
   const token = issueToken(user.id);
   return {
@@ -1126,10 +1257,20 @@ app.post('/api/auth/login', async (request, reply) => {
   const user = db.users.find(item => item.login === login);
 
   if (!user || !verifyPassword(password, user.passwordHash)) {
+    logEvent('warn', 'login-failed', {
+      login,
+      ip: getRequestIp(request)
+    });
     return reply.code(401).send({ ok: false, error: 'Неверный логин или пароль' });
   }
 
   const token = issueToken(user.id);
+  logEvent('info', 'login-success', {
+    actorId: user.id,
+    actorLogin: user.login,
+    actorIsAdmin: Boolean(user.isAdmin),
+    ip: getRequestIp(request)
+  });
   return {
     ok: true,
     token,
@@ -1169,16 +1310,61 @@ app.get('/api/admin/users', { preHandler: [authenticate, requireAdmin] }, async 
   };
 });
 
+app.get('/api/admin/logs', { preHandler: [authenticate, requireAdmin] }, async request => {
+  const query = request.query && typeof request.query === 'object' ? request.query : {};
+  const levelRaw = String(query.level || 'all').trim().toLowerCase();
+  const level = KNOWN_LOG_LEVELS.includes(levelRaw) ? levelRaw : 'all';
+
+  const limitRaw = Number.parseInt(String(query.limit ?? 200), 10);
+  const limit = Number.isFinite(limitRaw) ? Math.max(20, Math.min(limitRaw, 1000)) : 200;
+
+  const filtered = level === 'all'
+    ? auditLogs
+    : auditLogs.filter(item => item.level === level);
+
+  const entries = filtered.slice(-limit).reverse();
+  const levelCounts = {
+    error: 0,
+    warn: 0,
+    info: 0,
+    debug: 0,
+    trace: 0,
+    fatal: 0
+  };
+
+  for (const item of auditLogs) {
+    if (levelCounts[item.level] !== undefined) {
+      levelCounts[item.level] += 1;
+    }
+  }
+
+  return {
+    ok: true,
+    selectedLevel: level,
+    total: filtered.length,
+    limit,
+    levelCounts,
+    entries
+  };
+});
+
 app.post('/api/admin/users/:id/subscription', { preHandler: [authenticate, requireAdmin] }, async (request, reply) => {
   const { id } = request.params;
   const body = request.body && typeof request.body === 'object' ? request.body : {};
   const target = db.users.find(user => user.id === id);
 
   if (!target) {
+    logEvent('warn', 'subscription-activate-user-not-found', buildRequestLogMeta(request, {
+      targetUserId: id
+    }));
     return reply.code(404).send({ ok: false, error: 'Пользователь не найден' });
   }
 
   if (target.isAdmin) {
+    logEvent('warn', 'subscription-activate-admin-blocked', buildRequestLogMeta(request, {
+      targetUserId: id,
+      targetLogin: target.login
+    }));
     return reply.code(400).send({ ok: false, error: 'Подписка для администратора не требуется' });
   }
 
@@ -1186,6 +1372,10 @@ app.post('/api/admin/users/:id/subscription', { preHandler: [authenticate, requi
   if (typeof body.until === 'string' && body.until.trim()) {
     const parsedTs = Date.parse(body.until);
     if (Number.isNaN(parsedTs)) {
+      logEvent('warn', 'subscription-activate-invalid-date', buildRequestLogMeta(request, {
+        targetUserId: id,
+        until: body.until
+      }));
       return reply.code(400).send({ ok: false, error: 'Некорректная дата подписки' });
     }
     nextUntil = new Date(parsedTs).toISOString();
@@ -1198,6 +1388,12 @@ app.post('/api/admin/users/:id/subscription', { preHandler: [authenticate, requi
 
   target.subscriptionUntil = nextUntil;
   await saveDb();
+
+  logEvent('info', 'subscription-activated', buildRequestLogMeta(request, {
+    targetUserId: target.id,
+    targetLogin: target.login,
+    subscriptionUntil: nextUntil
+  }));
 
   const status = buildSubscriptionStatus(target);
   return {
@@ -1216,6 +1412,7 @@ app.post('/api/admin/users/:id/subscription', { preHandler: [authenticate, requi
 });
 
 app.post('/api/auth/logout', { preHandler: authenticate }, async request => {
+  logEvent('info', 'logout', buildRequestLogMeta(request));
   if (request.authToken) {
     sessions.delete(request.authToken);
   }
@@ -1244,6 +1441,7 @@ app.get('/api/recounts/:id', { preHandler: [authenticate, requireServiceAccess] 
   const recount = db.recounts.find(item => item.id === id && item.userId === request.user.id);
 
   if (!recount) {
+    logEvent('warn', 'recount-open-not-found', buildRequestLogMeta(request, { recountId: id }));
     return reply.code(404).send({ ok: false, error: 'Просчет не найден' });
   }
 
@@ -1258,6 +1456,7 @@ app.post('/api/recounts/:id/reopen', { preHandler: [authenticate, requireService
   const recount = db.recounts.find(item => item.id === id && item.userId === request.user.id);
 
   if (!recount) {
+    logEvent('warn', 'recount-reopen-not-found', buildRequestLogMeta(request, { recountId: id }));
     return reply.code(404).send({ ok: false, error: 'Просчет не найден' });
   }
 
@@ -1270,6 +1469,10 @@ app.post('/api/recounts/:id/reopen', { preHandler: [authenticate, requireService
 
   const active = findUserActiveRecount(request.user.id);
   if (active && active.id !== recount.id) {
+    logEvent('warn', 'recount-reopen-blocked-active-exists', buildRequestLogMeta(request, {
+      recountId: id,
+      activeRecountId: active.id
+    }));
     return reply.code(409).send({ ok: false, error: 'Сначала завершите или закройте текущий активный просчет' });
   }
 
@@ -1277,6 +1480,11 @@ app.post('/api/recounts/:id/reopen', { preHandler: [authenticate, requireService
   recount.completedAt = null;
   recount.updatedAt = toIsoNow();
   await saveDb();
+
+  logEvent('info', 'recount-reopen-success', buildRequestLogMeta(request, {
+    recountId: recount.id,
+    docId: recount.docId
+  }));
 
   return {
     ok: true,
@@ -1287,17 +1495,25 @@ app.post('/api/recounts/:id/reopen', { preHandler: [authenticate, requireService
 app.post('/api/recounts/from-pdf', { preHandler: [authenticate, requireServiceAccess] }, async (request, reply) => {
   const active = findUserActiveRecount(request.user.id);
   if (active) {
+    logEvent('warn', 'recount-create-blocked-active-exists', buildRequestLogMeta(request, {
+      activeRecountId: active.id
+    }));
     return reply.code(409).send({ ok: false, error: 'У вас уже есть активный просчет' });
   }
 
   const file = await request.file();
   if (!file) {
+    logEvent('warn', 'recount-create-missing-file', buildRequestLogMeta(request));
     return reply.code(400).send({ ok: false, error: 'PDF file is required' });
   }
 
   const isPdfMime = file.mimetype === 'application/pdf';
   const isPdfName = file.filename?.toLowerCase().endsWith('.pdf');
   if (!isPdfMime && !isPdfName) {
+    logEvent('warn', 'recount-create-invalid-file-type', buildRequestLogMeta(request, {
+      fileName: file.filename,
+      mimeType: file.mimetype
+    }));
     return reply.code(400).send({ ok: false, error: 'Only PDF files are supported' });
   }
 
@@ -1331,6 +1547,13 @@ app.post('/api/recounts/from-pdf', { preHandler: [authenticate, requireServiceAc
   db.recounts.push(recount);
   await saveDb();
 
+  logEvent('info', 'recount-create-success', buildRequestLogMeta(request, {
+    recountId: recount.id,
+    docId: recount.docId,
+    sourceFileName: recount.sourceFileName,
+    itemsCount: recount.items.length
+  }));
+
   return {
     ok: true,
     recount: sanitizeActiveRecount(recount)
@@ -1343,10 +1566,15 @@ app.post('/api/recounts/:id/progress', { preHandler: [authenticate, requireServi
   const recount = db.recounts.find(item => item.id === id && item.userId === request.user.id);
 
   if (!recount) {
+    logEvent('warn', 'recount-progress-not-found', buildRequestLogMeta(request, { recountId: id }));
     return reply.code(404).send({ ok: false, error: 'Просчет не найден' });
   }
 
   if (recount.status !== 'active') {
+    logEvent('warn', 'recount-progress-completed', buildRequestLogMeta(request, {
+      recountId: recount.id,
+      status: recount.status
+    }));
     return reply.code(409).send({ ok: false, error: 'Просчет уже завершен' });
   }
 
@@ -1392,15 +1620,25 @@ app.post('/api/recounts/:id/complete', { preHandler: [authenticate, requireServi
   const includeTotalSummary = Boolean(body.includeTotalSummary);
 
   if (!counterName || !groupName) {
+    logEvent('warn', 'recount-complete-missing-fields', buildRequestLogMeta(request, {
+      recountId: id,
+      hasCounterName: Boolean(counterName),
+      hasGroupName: Boolean(groupName)
+    }));
     return reply.code(400).send({ ok: false, error: 'Укажите просчитывающего и товарную группу' });
   }
 
   const recount = db.recounts.find(item => item.id === id && item.userId === request.user.id);
   if (!recount) {
+    logEvent('warn', 'recount-complete-not-found', buildRequestLogMeta(request, { recountId: id }));
     return reply.code(404).send({ ok: false, error: 'Просчет не найден' });
   }
 
   if (recount.status !== 'active') {
+    logEvent('warn', 'recount-complete-already-completed', buildRequestLogMeta(request, {
+      recountId: recount.id,
+      status: recount.status
+    }));
     return reply.code(409).send({ ok: false, error: 'Просчет уже завершен' });
   }
 
@@ -1426,6 +1664,14 @@ app.post('/api/recounts/:id/complete', { preHandler: [authenticate, requireServi
   recount.completedAt = toIsoNow();
   recount.updatedAt = toIsoNow();
   await saveDb();
+
+  logEvent('info', 'recount-complete-success', buildRequestLogMeta(request, {
+    recountId: recount.id,
+    docId: recount.docId,
+    counterName,
+    groupName,
+    includeTotalSummary
+  }));
 
   const pdfBuffer = await buildPdfBufferFromRecount(recount, {
     counterName,

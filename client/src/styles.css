@@ -222,6 +222,120 @@ button.ghost {
   overflow-y: auto;
 }
 
+.admin-logs-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.admin-log-tabs {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.admin-log-tab {
+  padding: 7px 10px;
+  border-radius: 10px;
+  background: rgba(25, 35, 53, 0.86);
+  font-size: 0.82rem;
+}
+
+.admin-log-tab.active {
+  background: linear-gradient(135deg, #1d6e43, #2dc770);
+}
+
+.admin-log-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 58vh;
+  overflow-y: auto;
+}
+
+.admin-log-item {
+  background: rgba(16, 22, 34, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  padding: 10px;
+}
+
+.admin-log-item-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.admin-log-event {
+  margin-top: 6px;
+  margin-bottom: 6px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.admin-log-level {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 62px;
+  border-radius: 999px;
+  padding: 3px 8px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+
+.admin-log-level.error {
+  background: rgba(243, 93, 116, 0.22);
+  color: #ffd1d9;
+}
+
+.admin-log-level.warn {
+  background: rgba(233, 174, 56, 0.26);
+  color: #ffe5a6;
+}
+
+.admin-log-level.info {
+  background: rgba(79, 141, 255, 0.22);
+  color: #cfe0ff;
+}
+
+.admin-log-level.debug,
+.admin-log-level.trace {
+  background: rgba(151, 168, 196, 0.2);
+  color: #dae5ff;
+}
+
+.admin-log-level.fatal {
+  background: rgba(170, 70, 255, 0.24);
+  color: #f0ddff;
+}
+
+.admin-log-item details {
+  margin-top: 6px;
+}
+
+.admin-log-item summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+
+.admin-log-meta {
+  margin: 8px 0 0;
+  padding: 8px;
+  border-radius: 8px;
+  background: rgba(9, 13, 21, 0.9);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: #d8e3ff;
+  font-size: 0.74rem;
+  line-height: 1.35;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .admin-user-card {
   display: flex;
   align-items: center;
