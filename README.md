@@ -46,3 +46,25 @@ chmod +x deploy.sh
 - установку зависимостей для `server` и `client`
 - `npm run build` для фронтенда
 - `pm2 restart lokalka-api --update-env`
+
+## Автодеплой через GitHub Actions
+
+В репозиторий добавлен workflow `.github/workflows/deploy.yml`.
+
+После каждого `git push origin main` GitHub Actions подключается к серверу по SSH и запускает `./deploy.sh`.
+
+Перед этим нужно добавить в GitHub репозиторий secrets:
+
+- `DEPLOY_HOST` - IP или домен сервера
+- `DEPLOY_PORT` - порт SSH, обычно `22`
+- `DEPLOY_USER` - пользователь для SSH, например `root`
+- `DEPLOY_PATH` - путь к приложению на сервере, обычно `/var/www/lokalka`
+- `DEPLOY_SSH_KEY` - приватный SSH-ключ для входа на сервер
+
+Путь в GitHub:
+
+```text
+Repository -> Settings -> Secrets and variables -> Actions
+```
+
+Если ключа для автодеплоя еще нет, создайте отдельную пару ключей и добавьте публичный ключ на сервер в `~/.ssh/authorized_keys`.
