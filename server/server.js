@@ -30,13 +30,16 @@ const ADMIN_PASSWORD = String(process.env.ADMIN_PASSWORD || 'admin');
 
 const db = {
   users: [],
-  recounts: []
+  recounts: [],
+  sessions: []
 };
 
 const sessions = new Map();
 const MAX_AUDIT_LOGS = Number.parseInt(process.env.MAX_AUDIT_LOGS || '2000', 10);
 const auditLogs = [];
 const KNOWN_LOG_LEVELS = ['all', 'error', 'warn', 'info', 'debug', 'trace', 'fatal'];
+const SESSION_TTL_DAYS = Number.parseInt(process.env.SESSION_TTL_DAYS || '30', 10);
+const SESSION_TTL_MS = Math.max(1, Number.isFinite(SESSION_TTL_DAYS) ? SESSION_TTL_DAYS : 30) * 24 * 60 * 60 * 1000;
 
 const SHOP_API_URL = process.env.SHOP_API_URL || '';
 const SHOP_API_METHOD = (process.env.SHOP_API_METHOD || 'GET').toUpperCase();
@@ -153,6 +156,17 @@ function buildRequestLogMeta(request, extra = {}) {
   };
 }
 
+function normalizeDeviceId(value) {
+  return String(value || '')
+    .trim()
+    .replace(/[^a-zA-Z0-9._:-]/g, '')
+    .slice(0, 120);
+}
+
+function getDeviceIdFromRequest(request) {
+  return normalizeDeviceId(request?.headers?.['x-device-id']);
+}
+
 function normalizeLogin(value) {
   return String(value || '').trim().toLowerCase();
 }
@@ -184,19 +198,34 @@ async function loadDb() {
         ...user,
         login: normalizeLogin(user.login),
         isAdmin: Boolean(user.isAdmin || normalizeLogin(user.login) === ADMIN_LOGIN),
-        subscriptionUntil: user.subscriptionUntil ? String(user.subscriptionUntil) : null
+        subscriptionUntil: user.subscriptionUntil ? String(user.subscriptionUntil) : null,
+        deviceId: user?.deviceId ? normalizeDeviceId(user.deviceId) : null
       }))
       : [];
     db.recounts = Array.isArray(parsed?.recounts) ? parsed.recounts : [];
+    db.sessions = Array.isArray(parsed?.sessions)
+      ? parsed.sessions.map(item => ({
+        token: String(item?.token || '').trim(),
+        userId: String(item?.userId || '').trim(),
+        createdAt: item?.createdAt ? String(item.createdAt) : toIsoNow(),
+        updatedAt: item?.updatedAt ? String(item.updatedAt) : toIsoNow(),
+        expiresAt: item?.expiresAt ? String(item.expiresAt) : new Date(Date.now() + SESSION_TTL_MS).toISOString(),
+        ip: item?.ip ? clipLogString(item.ip, 120) : null,
+        userAgent: item?.userAgent ? clipLogString(item.userAgent, 240) : null,
+        deviceId: item?.deviceId ? normalizeDeviceId(item.deviceId) : null
+      }))
+      : [];
 
-    const didChange = ensureAdminUser();
+    const didChange = ensureAdminUser() || hydrateSessionsFromDb();
     if (didChange) {
       await saveDb();
     }
   } catch {
     db.users = [];
     db.recounts = [];
+    db.sessions = [];
     ensureAdminUser();
+    hydrateSessionsFromDb();
     await saveDb();
   }
 }
@@ -212,7 +241,8 @@ function publicUser(user) {
     createdAt: user.createdAt,
     isAdmin: Boolean(user.isAdmin),
     subscriptionUntil: user.subscriptionUntil || null,
-    subscriptionActive: hasActiveSubscription(user)
+    subscriptionActive: hasActiveSubscription(user),
+    deviceBound: Boolean(user.deviceId)
   };
 }
 
@@ -245,7 +275,8 @@ function ensureAdminUser() {
     passwordHash: hashPassword(ADMIN_PASSWORD),
     createdAt: toIsoNow(),
     isAdmin: true,
-    subscriptionUntil: null
+    subscriptionUntil: null,
+    deviceId: null
   });
   return true;
 }
@@ -283,8 +314,97 @@ function buildSubscriptionStatus(user) {
 
 function issueToken(userId) {
   const token = randomBytes(24).toString('hex');
-  sessions.set(token, userId);
   return token;
+}
+
+function hydrateSessionsFromDb() {
+  const userIds = new Set(db.users.map(user => user.id));
+  const nowTs = Date.now();
+  const candidates = Array.isArray(db.sessions) ? db.sessions : [];
+
+  const valid = candidates
+    .map(item => ({
+      token: String(item?.token || '').trim(),
+      userId: String(item?.userId || '').trim(),
+      createdAt: item?.createdAt ? String(item.createdAt) : toIsoNow(),
+      updatedAt: item?.updatedAt ? String(item.updatedAt) : toIsoNow(),
+      expiresAt: item?.expiresAt ? String(item.expiresAt) : new Date(Date.now() + SESSION_TTL_MS).toISOString(),
+      ip: item?.ip ? clipLogString(item.ip, 120) : null,
+      userAgent: item?.userAgent ? clipLogString(item.userAgent, 240) : null,
+      deviceId: item?.deviceId ? normalizeDeviceId(item.deviceId) : null
+    }))
+    .filter(item => item.token && item.userId && userIds.has(item.userId))
+    .filter(item => {
+      const expiresTs = Date.parse(item.expiresAt);
+      return !Number.isNaN(expiresTs) && expiresTs > nowTs;
+    })
+    .sort((a, b) => {
+      const aTs = Date.parse(a.updatedAt || a.createdAt || '') || 0;
+      const bTs = Date.parse(b.updatedAt || b.createdAt || '') || 0;
+      return bTs - aTs;
+    });
+
+  const byUser = new Map();
+  for (const session of valid) {
+    if (!byUser.has(session.userId)) {
+      byUser.set(session.userId, session);
+    }
+  }
+
+  const next = Array.from(byUser.values());
+  sessions.clear();
+  for (const session of next) {
+    sessions.set(session.token, session);
+  }
+
+  const changed = JSON.stringify(next) !== JSON.stringify(db.sessions || []);
+  db.sessions = next;
+  return changed;
+}
+
+async function createSessionForUser(user, request) {
+  const nowIso = toIsoNow();
+  const expiresAt = new Date(Date.now() + SESSION_TTL_MS).toISOString();
+  const token = issueToken(user.id);
+  const deviceId = getDeviceIdFromRequest(request);
+
+  for (const [existingToken, session] of sessions.entries()) {
+    if (session?.userId === user.id) {
+      sessions.delete(existingToken);
+    }
+  }
+
+  db.sessions = (Array.isArray(db.sessions) ? db.sessions : []).filter(session => session.userId !== user.id);
+
+  const nextSession = {
+    token,
+    userId: user.id,
+    createdAt: nowIso,
+    updatedAt: nowIso,
+    expiresAt,
+    ip: getRequestIp(request),
+    userAgent: clipLogString(request?.headers?.['user-agent'] || '', 240),
+    deviceId: deviceId || null
+  };
+
+  db.sessions.push(nextSession);
+  sessions.set(token, nextSession);
+  await saveDb();
+  return token;
+}
+
+async function revokeSessionByToken(token) {
+  const normalized = String(token || '').trim();
+  if (!normalized) return false;
+
+  sessions.delete(normalized);
+  const current = Array.isArray(db.sessions) ? db.sessions : [];
+  const next = current.filter(session => session.token !== normalized);
+  if (next.length === current.length) return false;
+
+  db.sessions = next;
+  await saveDb();
+  return true;
 }
 
 function getTokenFromRequest(request) {
@@ -295,7 +415,23 @@ function getTokenFromRequest(request) {
 
 async function authenticate(request, reply) {
   const token = getTokenFromRequest(request);
-  const userId = token ? sessions.get(token) : null;
+  const requestDeviceId = getDeviceIdFromRequest(request);
+  const session = token ? sessions.get(token) : null;
+  if (session) {
+    const expiresTs = Date.parse(String(session.expiresAt || ''));
+    if (Number.isNaN(expiresTs) || expiresTs <= Date.now()) {
+      await revokeSessionByToken(token);
+      logEvent('warn', 'session-expired', {
+        method: request.method,
+        path: request.url,
+        ip: getRequestIp(request)
+      });
+      reply.code(401).send({ ok: false, error: 'Сессия истекла. Войдите снова.' });
+      return;
+    }
+  }
+
+  const userId = session?.userId || null;
   const user = userId ? db.users.find(item => item.id === userId) : null;
 
   if (!user) {
@@ -306,6 +442,71 @@ async function authenticate(request, reply) {
     });
     reply.code(401).send({ ok: false, error: 'Требуется авторизация' });
     return;
+  }
+
+  if (!requestDeviceId) {
+    logEvent('warn', 'device-id-required', {
+      method: request.method,
+      path: request.url,
+      actorId: user.id,
+      actorLogin: user.login,
+      ip: getRequestIp(request)
+    });
+    reply.code(401).send({ ok: false, code: 'DEVICE_ID_REQUIRED', error: 'Не удалось определить устройство. Обновите приложение.' });
+    return;
+  }
+
+  if (user.deviceId && user.deviceId !== requestDeviceId) {
+    logEvent('warn', 'device-mismatch-auth', {
+      method: request.method,
+      path: request.url,
+      actorId: user.id,
+      actorLogin: user.login,
+      expectedDeviceId: user.deviceId,
+      gotDeviceId: requestDeviceId,
+      ip: getRequestIp(request)
+    });
+    reply.code(403).send({ ok: false, code: 'DEVICE_MISMATCH', error: 'Аккаунт привязан к другому устройству. Обратитесь к администратору.' });
+    return;
+  }
+
+  if (session?.deviceId && session.deviceId !== requestDeviceId) {
+    logEvent('warn', 'session-device-mismatch', {
+      method: request.method,
+      path: request.url,
+      actorId: user.id,
+      actorLogin: user.login,
+      sessionDeviceId: session.deviceId,
+      gotDeviceId: requestDeviceId,
+      ip: getRequestIp(request)
+    });
+    reply.code(401).send({ ok: false, code: 'SESSION_DEVICE_MISMATCH', error: 'Сессия недействительна для этого устройства. Войдите снова.' });
+    return;
+  }
+
+  if (!user.deviceId) {
+    user.deviceId = requestDeviceId;
+    if (session && !session.deviceId) {
+      session.deviceId = requestDeviceId;
+      session.updatedAt = toIsoNow();
+      const sessionIndex = (Array.isArray(db.sessions) ? db.sessions : [])
+        .findIndex(item => item.token === token);
+      if (sessionIndex >= 0) {
+        db.sessions[sessionIndex] = {
+          ...db.sessions[sessionIndex],
+          deviceId: requestDeviceId,
+          updatedAt: session.updatedAt
+        };
+      }
+    }
+    await saveDb();
+
+    logEvent('info', 'device-bound-on-auth', {
+      actorId: user.id,
+      actorLogin: user.login,
+      deviceId: requestDeviceId,
+      ip: getRequestIp(request)
+    });
   }
 
   request.authToken = token;
@@ -1196,6 +1397,11 @@ app.post('/api/auth/register', async (request, reply) => {
   const body = request.body && typeof request.body === 'object' ? request.body : {};
   const login = normalizeLogin(body.login);
   const password = String(body.password || '');
+  const deviceId = getDeviceIdFromRequest(request);
+
+  if (!deviceId) {
+    return reply.code(400).send({ ok: false, code: 'DEVICE_ID_REQUIRED', error: 'Не удалось определить устройство. Обновите приложение.' });
+  }
 
   if (login.length < 3) {
     logEvent('warn', 'register-invalid-login', {
@@ -1229,7 +1435,8 @@ app.post('/api/auth/register', async (request, reply) => {
     passwordHash: hashPassword(password),
     createdAt: toIsoNow(),
     isAdmin: false,
-    subscriptionUntil: null
+    subscriptionUntil: null,
+    deviceId
   };
 
   db.users.push(user);
@@ -1241,7 +1448,7 @@ app.post('/api/auth/register', async (request, reply) => {
     ip: getRequestIp(request)
   });
 
-  const token = issueToken(user.id);
+  const token = await createSessionForUser(user, request);
   return {
     ok: true,
     token,
@@ -1254,7 +1461,12 @@ app.post('/api/auth/login', async (request, reply) => {
   const body = request.body && typeof request.body === 'object' ? request.body : {};
   const login = normalizeLogin(body.login);
   const password = String(body.password || '');
+  const deviceId = getDeviceIdFromRequest(request);
   const user = db.users.find(item => item.login === login);
+
+  if (!deviceId) {
+    return reply.code(400).send({ ok: false, code: 'DEVICE_ID_REQUIRED', error: 'Не удалось определить устройство. Обновите приложение.' });
+  }
 
   if (!user || !verifyPassword(password, user.passwordHash)) {
     logEvent('warn', 'login-failed', {
@@ -1264,7 +1476,33 @@ app.post('/api/auth/login', async (request, reply) => {
     return reply.code(401).send({ ok: false, error: 'Неверный логин или пароль' });
   }
 
-  const token = issueToken(user.id);
+  if (user.deviceId && user.deviceId !== deviceId) {
+    logEvent('warn', 'login-device-mismatch', {
+      actorId: user.id,
+      actorLogin: user.login,
+      expectedDeviceId: user.deviceId,
+      gotDeviceId: deviceId,
+      ip: getRequestIp(request)
+    });
+    return reply.code(403).send({
+      ok: false,
+      code: 'DEVICE_MISMATCH',
+      error: 'Аккаунт уже привязан к другому устройству. Обратитесь к администратору.'
+    });
+  }
+
+  if (!user.deviceId) {
+    user.deviceId = deviceId;
+    await saveDb();
+    logEvent('info', 'device-bound-on-login', {
+      actorId: user.id,
+      actorLogin: user.login,
+      deviceId,
+      ip: getRequestIp(request)
+    });
+  }
+
+  const token = await createSessionForUser(user, request);
   logEvent('info', 'login-success', {
     actorId: user.id,
     actorLogin: user.login,
@@ -1299,6 +1537,7 @@ app.get('/api/admin/users', { preHandler: [authenticate, requireAdmin] }, async 
         isAdmin: Boolean(user.isAdmin),
         subscriptionUntil: user.subscriptionUntil || null,
         subscriptionActive: hasActiveSubscription(user),
+        deviceBound: Boolean(user.deviceId),
         subscriptionStatusKey: status.key,
         subscriptionStatusLabel: status.label
       };
@@ -1411,10 +1650,45 @@ app.post('/api/admin/users/:id/subscription', { preHandler: [authenticate, requi
   };
 });
 
+app.post('/api/admin/users/:id/device/reset', { preHandler: [authenticate, requireAdmin] }, async (request, reply) => {
+  const { id } = request.params;
+  const target = db.users.find(user => user.id === id);
+
+  if (!target) {
+    return reply.code(404).send({ ok: false, error: 'Пользователь не найден' });
+  }
+
+  target.deviceId = null;
+
+  const removedTokens = [];
+  for (const [token, session] of sessions.entries()) {
+    if (session?.userId === target.id) {
+      removedTokens.push(token);
+      sessions.delete(token);
+    }
+  }
+
+  db.sessions = (Array.isArray(db.sessions) ? db.sessions : [])
+    .filter(session => session.userId !== target.id);
+
+  await saveDb();
+
+  logEvent('warn', 'admin-reset-device-binding', buildRequestLogMeta(request, {
+    targetUserId: target.id,
+    targetLogin: target.login,
+    removedSessions: removedTokens.length
+  }));
+
+  return {
+    ok: true,
+    user: publicUser(target)
+  };
+});
+
 app.post('/api/auth/logout', { preHandler: authenticate }, async request => {
   logEvent('info', 'logout', buildRequestLogMeta(request));
   if (request.authToken) {
-    sessions.delete(request.authToken);
+    await revokeSessionByToken(request.authToken);
   }
 
   return { ok: true };

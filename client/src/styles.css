@@ -354,6 +354,17 @@ button.ghost {
   gap: 4px;
 }
 
+.admin-user-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 140px;
+}
+
+.admin-user-actions button {
+  width: 100%;
+}
+
 .admin-user-login {
   font-weight: 700;
   word-break: break-word;

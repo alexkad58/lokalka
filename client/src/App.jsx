@@ -12,6 +12,7 @@ import {
   me,
   reopenRecount,
   register,
+  resetUserDeviceBinding,
   resolveBarcode,
   saveRecountProgress,
   setAuthToken
@@ -788,6 +789,20 @@ export default function App() {
     }
   }
 
+  async function resetDeviceBindingForUser(targetUserId) {
+    setActivatingUserId(targetUserId);
+    setError('');
+    try {
+      await resetUserDeviceBinding(targetUserId);
+      await refreshAdminUsers();
+      await refreshAdminLogs(adminLogLevel);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось сбросить устройство');
+    } finally {
+      setActivatingUserId('');
+    }
+  }
+
   if (!token) {
     return (
       <div className="auth-page">
@@ -872,14 +887,25 @@ export default function App() {
                   <div className="admin-user-main">
                     <div className="admin-user-login">{item.login}</div>
                     <div className="line mini">Статус: {formatSubscriptionStatusLabel(item)}</div>
+                    <div className="line mini">Устройство: {item.deviceBound ? 'Привязано' : 'Не привязано'}</div>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => activateSubscriptionForUser(item.id)}
-                    disabled={item.isAdmin || activatingUserId === item.id}
-                  >
-                    {activatingUserId === item.id ? 'Активация...' : 'Активировать'}
-                  </button>
+                  <div className="admin-user-actions">
+                    <button
+                      type="button"
+                      onClick={() => activateSubscriptionForUser(item.id)}
+                      disabled={item.isAdmin || activatingUserId === item.id}
+                    >
+                      {activatingUserId === item.id ? 'Подождите...' : 'Активировать'}
+                    </button>
+                    <button
+                      type="button"
+                      className="ghost"
+                      onClick={() => resetDeviceBindingForUser(item.id)}
+                      disabled={activatingUserId === item.id}
+                    >
+                      Сбросить устройство
+                    </button>
+                  </div>
                 </article>
               ))}
               {!adminUsers.length ? <div className="status">Пользователи не найдены</div> : null}

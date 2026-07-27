@@ -1,9 +1,32 @@
 let authToken = '';
+const DEVICE_ID_KEY = 'lokalka_device_id';
+
+function createDeviceId() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  const randomPart = Math.random().toString(36).slice(2, 12);
+  return `dev_${Date.now()}_${randomPart}`;
+}
+
+function getOrCreateDeviceId() {
+  if (typeof localStorage === 'undefined') return 'dev_unknown';
+
+  const existing = String(localStorage.getItem(DEVICE_ID_KEY) || '').trim();
+  if (existing) return existing;
+
+  const next = createDeviceId();
+  localStorage.setItem(DEVICE_ID_KEY, next);
+  return next;
+}
+
+const deviceId = getOrCreateDeviceId();
 
 function authHeaders(extra = {}) {
+  const base = { ...extra, 'X-Device-Id': deviceId };
   return authToken
-    ? { ...extra, Authorization: `Bearer ${authToken}` }
-    : extra;
+    ? { ...base, Authorization: `Bearer ${authToken}` }
+    : base;
 }
 
 async function readJsonOrThrow(response, fallbackError) {
@@ -21,7 +44,7 @@ export function setAuthToken(token) {
 export async function register(login, password) {
   const response = await fetch('/api/auth/register', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ login, password })
   });
   return readJsonOrThrow(response, 'Не удалось зарегистрироваться');
@@ -30,7 +53,7 @@ export async function register(login, password) {
 export async function login(loginValue, password) {
   const response = await fetch('/api/auth/login', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ login: loginValue, password })
   });
   return readJsonOrThrow(response, 'Не удалось войти');
@@ -76,6 +99,14 @@ export async function activateUserSubscription(userId, payload = {}) {
     body: JSON.stringify(payload)
   });
   return readJsonOrThrow(response, 'Не удалось активировать подписку');
+}
+
+export async function resetUserDeviceBinding(userId) {
+  const response = await fetch(`/api/admin/users/${encodeURIComponent(userId)}/device/reset`, {
+    method: 'POST',
+    headers: authHeaders()
+  });
+  return readJsonOrThrow(response, 'Не удалось сбросить привязку устройства');
 }
 
 export async function getRecounts() {
