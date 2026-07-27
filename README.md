@@ -59,7 +59,9 @@ chmod +x deploy.sh
 - `DEPLOY_PORT` - порт SSH, обычно `22`
 - `DEPLOY_USER` - пользователь для SSH, например `root`
 - `DEPLOY_PATH` - путь к приложению на сервере, обычно `/var/www/lokalka`
-- `DEPLOY_SSH_KEY` - приватный SSH-ключ для входа на сервер
+- `DEPLOY_SSH_KEY_BASE64` - приватный SSH-ключ для входа на сервер в base64
+
+Можно использовать и `DEPLOY_SSH_KEY`, но для Windows безопаснее `DEPLOY_SSH_KEY_BASE64`, чтобы GitHub Secrets не ломал переносы строк ключа.
 
 Путь в GitHub:
 
@@ -68,3 +70,11 @@ Repository -> Settings -> Secrets and variables -> Actions
 ```
 
 Если ключа для автодеплоя еще нет, создайте отдельную пару ключей и добавьте публичный ключ на сервер в `~/.ssh/authorized_keys`.
+
+Команда для подготовки base64-секрета в PowerShell:
+
+```powershell
+[Convert]::ToBase64String([IO.File]::ReadAllBytes("$env:USERPROFILE\.ssh\lokalka_deploy"))
+```
+
+Получившуюся строку целиком сохраните в GitHub Secret `DEPLOY_SSH_KEY_BASE64`.
