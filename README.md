@@ -27,3 +27,22 @@ npm run dev
 - `POST /api/recount/:docId/values` - сохранить значения факта/счётчика.
 - `POST /api/recount/export` - собрать итоговый JSON или PDF на сервере.
 - `GET /api/recount/templates` - если позже появятся разные шаблоны PDF.
+
+## Деплой на прод
+
+В корне репозитория есть скрипт `deploy.sh` для сервера.
+
+Пример использования на проде:
+
+```bash
+cd /var/www/lokalka
+chmod +x deploy.sh
+./deploy.sh
+```
+
+Скрипт делает:
+
+- `git pull --ff-only origin main`
+- установку зависимостей для `server` и `client`
+- `npm run build` для фронтенда
+- `pm2 restart lokalka-api --update-env`
