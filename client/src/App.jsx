@@ -982,7 +982,12 @@ export default function App() {
           <h1>Подписка не активна</h1>
           <p>
             Для доступа к сервису нужна активная подписка.
-            Обратитесь к администратору для активации аккаунта.
+            {' '}
+            Обратитесь в{' '}
+            <a href="https://t.me/alekseikb58" target="_blank" rel="noreferrer">
+              Telegram t.me/alekseikb58
+            </a>{' '}
+            для активации аккаунта.
           </p>
           <div className="status">Статус: {formatSubscriptionStatusLabel(user)}</div>
           <button type="button" className="ghost" onClick={() => handleLogout()}>

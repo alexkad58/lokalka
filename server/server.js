@@ -444,6 +444,12 @@ async function authenticate(request, reply) {
     return;
   }
 
+  if (user.isAdmin) {
+    request.authToken = token;
+    request.user = user;
+    return;
+  }
+
   if (!requestDeviceId) {
     logEvent('warn', 'device-id-required', {
       method: request.method,
@@ -466,7 +472,7 @@ async function authenticate(request, reply) {
       gotDeviceId: requestDeviceId,
       ip: getRequestIp(request)
     });
-    reply.code(403).send({ ok: false, code: 'DEVICE_MISMATCH', error: 'Аккаунт привязан к другому устройству. Обратитесь к администратору.' });
+    reply.code(403).send({ ok: false, code: 'DEVICE_MISMATCH', error: 'Аккаунт привязан к другому устройству. Обратитесь в Telegram: https://t.me/alekseikb58' });
     return;
   }
 
@@ -524,7 +530,7 @@ async function requireServiceAccess(request, reply) {
   reply.code(403).send({
     ok: false,
     code: 'SUBSCRIPTION_REQUIRED',
-    error: 'Подписка не активна. Обратитесь к администратору.'
+    error: 'Подписка не активна. Обратитесь в Telegram: https://t.me/alekseikb58'
   });
 }
 
@@ -1476,6 +1482,22 @@ app.post('/api/auth/login', async (request, reply) => {
     return reply.code(401).send({ ok: false, error: 'Неверный логин или пароль' });
   }
 
+  if (user.isAdmin) {
+    const token = await createSessionForUser(user, request);
+    logEvent('info', 'login-success', {
+      actorId: user.id,
+      actorLogin: user.login,
+      actorIsAdmin: Boolean(user.isAdmin),
+      ip: getRequestIp(request)
+    });
+    return {
+      ok: true,
+      token,
+      tokenType: TOKEN_STORAGE_KEY,
+      user: publicUser(user)
+    };
+  }
+
   if (user.deviceId && user.deviceId !== deviceId) {
     logEvent('warn', 'login-device-mismatch', {
       actorId: user.id,
@@ -1487,7 +1509,7 @@ app.post('/api/auth/login', async (request, reply) => {
     return reply.code(403).send({
       ok: false,
       code: 'DEVICE_MISMATCH',
-      error: 'Аккаунт уже привязан к другому устройству. Обратитесь к администратору.'
+      error: 'Аккаунт уже привязан к другому устройству. Обратитесь в Telegram: https://t.me/alekseikb58'
     });
   }
 
