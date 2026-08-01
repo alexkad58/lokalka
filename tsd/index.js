@@ -18,6 +18,19 @@ if (TSD_PROXY) {
   console.log(`Proxy enabled via TSD_PROXY`);
 }
 
+function withTimeout(promise, ms, stage) {
+  let timer = null;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error(`Timeout after ${ms}ms during ${stage}`));
+    }, ms);
+  });
+
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
 const formatDate = () => {
   const now = new Date();
   const dd = String(now.getDate()).padStart(2, "0");
@@ -211,11 +224,17 @@ bot.hears(/^[0-9]+$/, async (ctx) => {
 });
 
 try {
-  const me = await bot.api.getMe();
+  console.log("Bot startup: getMe...");
+  const me = await withTimeout(bot.api.getMe(), 15000, "getMe");
   console.log(`Authorized as @${me.username || me.id}`);
 
   // Ensure long polling works even if webhook had been configured earlier.
-  await bot.api.deleteWebhook({ drop_pending_updates: false });
+  console.log("Bot startup: deleteWebhook...");
+  await withTimeout(
+    bot.api.deleteWebhook({ drop_pending_updates: false }),
+    15000,
+    "deleteWebhook"
+  );
   console.log("Webhook cleared, starting long polling");
 
   await bot.start({

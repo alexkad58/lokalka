@@ -12,12 +12,13 @@ cd "${APP_DIR}"
 echo "==> Fetching latest code"
 git fetch origin "${BRANCH}"
 git checkout "${BRANCH}"
-git pull --ff-only origin "${BRANCH}"
+echo "==> Resetting local changes to match origin/${BRANCH}"
+git reset --hard "origin/${BRANCH}"
 
 echo "==> Installing dependencies"
-npm install
-npm --prefix server install
-npm --prefix client install
+npm ci
+npm --prefix server ci
+npm --prefix client ci
 
 echo "==> Building client"
 npm run build
