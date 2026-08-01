@@ -15,7 +15,7 @@ if (!BOT_TOKEN) {
 const TSD_PROXY = String(process.env.TSD_PROXY || "").trim();
 if (TSD_PROXY) {
   setGlobalDispatcher(new ProxyAgent(TSD_PROXY));
-  console.log(`[TSD_BOT] Proxy enabled via TSD_PROXY`);
+  console.log(`Proxy enabled via TSD_PROXY`);
 }
 
 const formatDate = () => {
@@ -111,6 +111,11 @@ const buildPayload = async (result, caption) => {
 
 const bot = new Bot(BOT_TOKEN);
 
+bot.catch((error) => {
+  const message = error instanceof Error ? error.stack || error.message : String(error);
+  console.error(`Bot update error: ${message}`);
+});
+
 // bot.on("message", (ctx) => {
 //   if (ctx.message.text) {
 //     logUserAction(ctx, "message", { text: ctx.message.text });
@@ -205,4 +210,21 @@ bot.hears(/^[0-9]+$/, async (ctx) => {
   logUserAction(ctx, "🔗 photo_report_link", { shop_id });
 });
 
-bot.start();
+try {
+  const me = await bot.api.getMe();
+  console.log(`Authorized as @${me.username || me.id}`);
+
+  // Ensure long polling works even if webhook had been configured earlier.
+  await bot.api.deleteWebhook({ drop_pending_updates: false });
+  console.log("Webhook cleared, starting long polling");
+
+  await bot.start({
+    onStart: (botInfo) => {
+      console.log(`Long polling started for @${botInfo.username || botInfo.id}`);
+    }
+  });
+} catch (error) {
+  const message = error instanceof Error ? error.stack || error.message : String(error);
+  console.error(`Bot startup failed: ${message}`);
+  process.exit(1);
+}

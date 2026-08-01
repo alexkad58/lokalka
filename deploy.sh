@@ -15,6 +15,7 @@ git checkout "${BRANCH}"
 git pull --ff-only origin "${BRANCH}"
 
 echo "==> Installing dependencies"
+npm install
 npm --prefix server install
 npm --prefix client install
 
