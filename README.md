@@ -15,6 +15,22 @@ npm run dev
 
 - `server/` - Fastify API для загрузки и парсинга PDF.
 - `client/` - React UI для загрузки файла и работы с объектом пересчёта.
+- `tsd/` - Telegram-бот для помощи с ТСД.
+
+## TSD бот вместе с backend
+
+Бот из `tsd/` запускается автоматически при старте backend (`npm run dev --prefix server` и `npm run start --prefix server`).
+
+Обязательные переменные в `server/.env`:
+
+- `TG_TOKEN` - токен Telegram бота.
+
+Опциональные:
+
+- `TSD_BOT_ENABLED=1` - включить/выключить автозапуск бота (`0` выключает).
+- `TSD_PROXY=http://login:password@host:port` - единая переменная прокси для бота.
+
+При указании `TSD_PROXY` она автоматически применяется ко всем исходящим запросам бота.
 
 ## Основной API
 

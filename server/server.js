@@ -4,9 +4,12 @@ import multipart from '@fastify/multipart';
 import { PDFParse } from 'pdf-parse';
 import http from 'node:http';
 import https from 'node:https';
+import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import PDFDocument from 'pdfkit';
 
 const app = Fastify({
@@ -56,6 +59,12 @@ const tokenState = {
   refreshToken: process.env.SHOP_API_REFRESH_TOKEN || '',
   updatedAt: Date.now()
 };
+
+const TSD_BOT_ENABLED = process.env.TSD_BOT_ENABLED !== '0';
+const TSD_PROXY = String(process.env.TSD_PROXY || '').trim();
+const SERVER_DIR = path.dirname(fileURLToPath(import.meta.url));
+const TSD_ENTRY = path.resolve(SERVER_DIR, '..', 'tsd', 'index.js');
+let tsdBotProcess = null;
 
 function createId(prefix) {
   return `${prefix}_${Date.now()}_${randomBytes(4).toString('hex')}`;
@@ -910,6 +919,73 @@ function logShopStdout(event, payload) {
     console.log(`[SHOP_API] ${event} ${JSON.stringify(payload)}`);
   } catch {
     console.log(`[SHOP_API] ${event}`);
+  }
+}
+
+function startTsdBotProcess() {
+  if (!TSD_BOT_ENABLED) {
+    logEvent('info', 'tsd-bot-disabled');
+    return;
+  }
+
+  if (!process.env.TG_TOKEN && !process.env.TOKEN) {
+    logEvent('warn', 'tsd-bot-missing-token', {
+      hasTgToken: Boolean(process.env.TG_TOKEN),
+      hasToken: Boolean(process.env.TOKEN)
+    });
+    return;
+  }
+
+  if (!existsSync(TSD_ENTRY)) {
+    logEvent('warn', 'tsd-bot-missing-entry', { entry: TSD_ENTRY });
+    return;
+  }
+
+  const env = { ...process.env };
+  if (TSD_PROXY) {
+    // One env var controls proxy for all bot outbound traffic.
+    env.TSD_PROXY = TSD_PROXY;
+    env.HTTP_PROXY = TSD_PROXY;
+    env.HTTPS_PROXY = TSD_PROXY;
+    env.ALL_PROXY = TSD_PROXY;
+    env.NODE_USE_ENV_PROXY = '1';
+  }
+
+  tsdBotProcess = spawn(process.execPath, [TSD_ENTRY], {
+    cwd: path.resolve(SERVER_DIR, '..'),
+    env,
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+
+  tsdBotProcess.stdout.on('data', chunk => {
+    const text = String(chunk || '').trim();
+    if (!text) return;
+    console.log(`[TSD_BOT] ${text}`);
+  });
+
+  tsdBotProcess.stderr.on('data', chunk => {
+    const text = String(chunk || '').trim();
+    if (!text) return;
+    console.error(`[TSD_BOT_ERR] ${text}`);
+  });
+
+  tsdBotProcess.on('exit', (code, signal) => {
+    logEvent('warn', 'tsd-bot-exit', { code, signal });
+    tsdBotProcess = null;
+  });
+
+  logEvent('info', 'tsd-bot-started', {
+    pid: tsdBotProcess.pid,
+    proxyEnabled: Boolean(TSD_PROXY)
+  });
+}
+
+function stopTsdBotProcess() {
+  if (!tsdBotProcess || tsdBotProcess.killed) return;
+  try {
+    tsdBotProcess.kill('SIGTERM');
+  } catch {
+    // Ignore process-kill race conditions during shutdown.
   }
 }
 
@@ -2195,6 +2271,13 @@ async function startServer() {
   await loadDb();
   logShopApiStartupConfig();
   await app.listen({ port: Number(process.env.PORT || 3000), host: '0.0.0.0' });
+  startTsdBotProcess();
+}
+
+for (const signal of ['SIGINT', 'SIGTERM', 'exit']) {
+  process.on(signal, () => {
+    stopTsdBotProcess();
+  });
 }
 
 startServer().catch(error => {
