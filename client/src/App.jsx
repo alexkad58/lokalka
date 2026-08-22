@@ -3,6 +3,8 @@ import {
   activateUserSubscription,
   completeRecount,
   createRecountFromPdf,
+  deleteAdminUser,
+  finishRecountWithoutPdf,
   getAdminLogs,
   getAdminUsers,
   getRecount,
@@ -15,7 +17,8 @@ import {
   resetUserDeviceBinding,
   resolveBarcode,
   saveRecountProgress,
-  setAuthToken
+  setAuthToken,
+  updateAccountSettings
 } from './api';
 
 const TOKEN_KEY = 'lokalka_auth_token';
@@ -151,12 +154,15 @@ export default function App() {
   const [activeSummary, setActiveSummary] = useState(null);
   const [previousRecounts, setPreviousRecounts] = useState([]);
   const [adminUsers, setAdminUsers] = useState([]);
+  const [adminTab, setAdminTab] = useState('users');
   const [adminLogLevel, setAdminLogLevel] = useState('all');
   const [adminLogEntries, setAdminLogEntries] = useState([]);
   const [adminLogCounts, setAdminLogCounts] = useState({});
   const [adminLogLoading, setAdminLogLoading] = useState(false);
   const [activationDays, setActivationDays] = useState('30');
   const [activatingUserId, setActivatingUserId] = useState('');
+  const [expandedUserId, setExpandedUserId] = useState('');
+  const [deletingUserId, setDeletingUserId] = useState('');
 
   const [activeRecount, setActiveRecount] = useState(null);
   const [values, setValues] = useState({});
@@ -174,10 +180,18 @@ export default function App() {
 
   const [mismatchModalOpen, setMismatchModalOpen] = useState(false);
   const [completeModalOpen, setCompleteModalOpen] = useState(false);
+  const [unresolvedBarcode, setUnresolvedBarcode] = useState('');
+  const [candidateCodes, setCandidateCodes] = useState([]);
+  const [bindModalOpen, setBindModalOpen] = useState(false);
+  const [bindSearch, setBindSearch] = useState('');
   const [counterName, setCounterName] = useState('');
   const [groupName, setGroupName] = useState('');
   const [includeTotalSummary, setIncludeTotalSummary] = useState(true);
+  const [updateCompletionTime, setUpdateCompletionTime] = useState(true);
   const [activeFactCode, setActiveFactCode] = useState('');
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [defaultCounterNameInput, setDefaultCounterNameInput] = useState('');
+  const [settingsSaving, setSettingsSaving] = useState(false);
 
   const fileInputRef = useRef(null);
   const videoRef = useRef(null);
@@ -189,11 +203,13 @@ export default function App() {
   const lastCodeRef = useRef('');
   const lastCodeTsRef = useRef(0);
   const pendingBarcodeRequestRef = useRef(new Map());
+  const barcodeCacheRef = useRef(barcodeCache);
   const flashTimeoutRef = useRef(0);
   const autosaveSnapshotRef = useRef('');
 
   useEffect(() => {
     saveBarcodeCache(barcodeCache);
+    barcodeCacheRef.current = barcodeCache;
   }, [barcodeCache]);
 
   useEffect(() => {
@@ -268,6 +284,24 @@ export default function App() {
       return code.includes(query) || name.includes(query);
     });
   }, [activeRecount, search]);
+
+  const bindFilteredItems = useMemo(() => {
+    const query = normalizeQuery(bindSearch);
+    const items = activeRecount?.items || [];
+    if (!query) return items;
+
+    return items.filter(item => {
+      const code = normalizeQuery(item.code);
+      const name = normalizeQuery(item.name);
+      return code.includes(query) || name.includes(query);
+    });
+  }, [activeRecount, bindSearch]);
+
+  const candidateItems = useMemo(() => {
+    if (!candidateCodes.length) return [];
+    const items = activeRecount?.items || [];
+    return items.filter(item => candidateCodes.includes(String(item.code)));
+  }, [activeRecount, candidateCodes]);
 
   const mismatchItems = useMemo(() => {
     if (!activeRecount?.items?.length) return [];
@@ -422,6 +456,8 @@ export default function App() {
     setMenuOpen(false);
     setMismatchModalOpen(false);
     setCompleteModalOpen(false);
+    setSettingsOpen(false);
+    setExpandedUserId('');
   }
 
   function getItemCodes() {
@@ -437,6 +473,9 @@ export default function App() {
       setActiveRecount(recount);
       setValues(recount.values || {});
       setSearch(recount.search || '');
+      setUnresolvedBarcode('');
+      setCandidateCodes([]);
+      setBindModalOpen(false);
 
       if (recount.barcodeCache && typeof recount.barcodeCache === 'object') {
         setBarcodeCache(prev => ({ ...prev, ...recount.barcodeCache }));
@@ -460,6 +499,9 @@ export default function App() {
       setMenuOpen(false);
       setMismatchModalOpen(false);
       setCompleteModalOpen(false);
+      setUnresolvedBarcode('');
+      setCandidateCodes([]);
+      setBindModalOpen(false);
 
       if (recount.barcodeCache && typeof recount.barcodeCache === 'object') {
         setBarcodeCache(prev => ({ ...prev, ...recount.barcodeCache }));
@@ -511,14 +553,15 @@ export default function App() {
   async function resolveBarcodeWithCache(rawBarcode) {
     const barcode = normalizeBarcodeValue(rawBarcode);
     if (!barcode) {
-      return { resolved: false, code: null, source: 'empty' };
+      return { resolved: false, codes: [], source: 'empty' };
     }
 
-    const localHit = barcodeCache[barcode];
-    if (localHit?.code) {
+    // The scan loop re-invokes this closure via RAF, so read the ref, not the stale state.
+    const localHit = barcodeCacheRef.current[barcode];
+    if (localHit?.codes?.length) {
       return {
         resolved: true,
-        code: String(localHit.code),
+        codes: localHit.codes.map(String),
         source: localHit.source || 'frontend-cache'
       };
     }
@@ -530,16 +573,21 @@ export default function App() {
 
     const requestPromise = resolveBarcode(barcode, getItemCodes())
       .then(apiResult => {
-        if (apiResult?.resolved && apiResult?.code) {
-          setBarcodeCache(prev => ({
-            ...prev,
-            [barcode]: {
-              code: String(apiResult.code),
-              source: apiResult.source || 'backend'
-            }
-          }));
+        const codes = Array.isArray(apiResult?.codes) ? apiResult.codes.map(String) : [];
+        if (apiResult?.resolved && codes.length) {
+          setBarcodeCache(prev => {
+            const existingCodes = prev[barcode]?.codes || [];
+            const merged = Array.from(new Set([...existingCodes, ...codes]));
+            return {
+              ...prev,
+              [barcode]: {
+                codes: merged,
+                source: apiResult.source || 'backend'
+              }
+            };
+          });
         }
-        return apiResult;
+        return { ...apiResult, codes };
       })
       .finally(() => {
         pendingBarcodeRequestRef.current.delete(barcode);
@@ -561,19 +609,66 @@ export default function App() {
     try {
       setScannerStatus('Поиск артикула...');
       const resolved = await resolveBarcodeWithCache(code);
-      if (resolved?.resolved && resolved?.code) {
-        setSearch(String(resolved.code));
+      const codes = resolved?.codes || [];
+
+      if (resolved?.resolved && codes.length === 1) {
+        setSearch(codes[0]);
         setScannerStatus(`Штрихкод считан (${resolved.source || 'cache'})`);
+        setUnresolvedBarcode('');
+        setCandidateCodes([]);
         triggerScanSuccessFlash();
+      } else if (resolved?.resolved && codes.length > 1) {
+        setScannerStatus('Найдено несколько товаров для этого штрихкода');
+        setUnresolvedBarcode(code);
+        setCandidateCodes(codes);
       } else {
         setSearch(code);
         setScannerStatus('Артикул не найден, поиск по штрихкоду');
+        setUnresolvedBarcode(code);
+        setCandidateCodes([]);
       }
     } catch {
       setSearch(code);
       setScannerStatus('Ошибка резолва, поиск по штрихкоду');
+      setUnresolvedBarcode(code);
+      setCandidateCodes([]);
     }
 
+    if (navigator.vibrate) navigator.vibrate(70);
+  }
+
+  function openBindModal() {
+    setBindSearch('');
+    setBindModalOpen(true);
+  }
+
+  function closeBindModal() {
+    setBindModalOpen(false);
+    setBindSearch('');
+  }
+
+  function bindBarcodeToItem(itemCode) {
+    const barcode = normalizeBarcodeValue(unresolvedBarcode);
+    if (!barcode) return;
+
+    setBarcodeCache(prev => {
+      const existingCodes = prev[barcode]?.codes || [];
+      const merged = Array.from(new Set([...existingCodes, String(itemCode)]));
+      return {
+        ...prev,
+        [barcode]: {
+          codes: merged,
+          source: 'manual'
+        }
+      };
+    });
+
+    setSearch(String(itemCode));
+    setScannerStatus('Штрихкод привязан вручную');
+    setUnresolvedBarcode('');
+    setCandidateCodes([]);
+    closeBindModal();
+    triggerScanSuccessFlash();
     if (navigator.vibrate) navigator.vibrate(70);
   }
 
@@ -710,6 +805,7 @@ export default function App() {
 
   function appendToActiveFact(char) {
     if (!activeFactCode) return;
+    if (navigator.vibrate) navigator.vibrate(18);
     const current = String(values[activeFactCode] ?? '');
     if (char === '+') {
       if (!current || current.endsWith('+')) return;
@@ -724,6 +820,7 @@ export default function App() {
 
   function eraseActiveFact() {
     if (!activeFactCode) return;
+    if (navigator.vibrate) navigator.vibrate(18);
     const current = String(values[activeFactCode] ?? '');
     updateFact(activeFactCode, current.slice(0, -1));
   }
@@ -740,7 +837,8 @@ export default function App() {
         ...progressPayload,
         counterName,
         groupName,
-        includeTotalSummary
+        includeTotalSummary,
+        updateCompletionTime
       });
 
       const url = URL.createObjectURL(result.blob);
@@ -764,12 +862,48 @@ export default function App() {
     }
   }
 
+  function openCompleteModal() {
+    setCounterName(prev => prev || user?.defaultCounterName || '');
+    setUpdateCompletionTime(true);
+    setCompleteModalOpen(true);
+  }
+
+  async function handleFinishWithoutPdf() {
+    if (!activeRecount) return;
+
+    setLoading(true);
+    setError('');
+
+    try {
+      const progressPayload = buildProgressPayload(values, search, barcodeCache);
+      await finishRecountWithoutPdf(activeRecount.id, {
+        ...progressPayload,
+        updateCompletionTime
+      });
+
+      setCompleteModalOpen(false);
+      setCounterName('');
+      setGroupName('');
+
+      stopScanner();
+      setActiveRecount(null);
+      await refreshDashboard();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось завершить просчет');
+    } finally {
+      setLoading(false);
+    }
+  }
+
   async function goHome() {
     stopScanner();
     setActiveRecount(null);
     setMenuOpen(false);
     setMismatchModalOpen(false);
     setCompleteModalOpen(false);
+    setUnresolvedBarcode('');
+    setCandidateCodes([]);
+    setBindModalOpen(false);
     await refreshDashboard();
   }
 
@@ -800,6 +934,45 @@ export default function App() {
       setError(err instanceof Error ? err.message : 'Не удалось сбросить устройство');
     } finally {
       setActivatingUserId('');
+    }
+  }
+
+  async function deleteUserAccount(targetUserId) {
+    if (!window.confirm('Удалить аккаунт без возможности восстановления?')) return;
+
+    setDeletingUserId(targetUserId);
+    setError('');
+    try {
+      await deleteAdminUser(targetUserId);
+      setExpandedUserId('');
+      await refreshAdminUsers();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось удалить пользователя');
+    } finally {
+      setDeletingUserId('');
+    }
+  }
+
+  function openSettings() {
+    setDefaultCounterNameInput(user?.defaultCounterName || '');
+    setSettingsOpen(true);
+  }
+
+  function closeSettings() {
+    setSettingsOpen(false);
+  }
+
+  async function saveAccountSettings() {
+    setSettingsSaving(true);
+    setError('');
+    try {
+      const result = await updateAccountSettings({ defaultCounterName: defaultCounterNameInput });
+      setUser(result.user || null);
+      setSettingsOpen(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось сохранить настройки');
+    } finally {
+      setSettingsSaving(false);
     }
   }
 
@@ -860,6 +1033,24 @@ export default function App() {
 
         {error ? <section className="status error">{error}</section> : null}
 
+        <div className="admin-tabs">
+          <button
+            type="button"
+            className={`admin-tab ${adminTab === 'users' ? 'active' : ''}`}
+            onClick={() => setAdminTab('users')}
+          >
+            Управление аккаунтами
+          </button>
+          <button
+            type="button"
+            className={`admin-tab ${adminTab === 'logs' ? 'active' : ''}`}
+            onClick={() => setAdminTab('logs')}
+          >
+            Просмотр логов
+          </button>
+        </div>
+
+        {adminTab === 'users' ? (
         <section className="panel">
           <h3>Пользователи</h3>
           <div className="admin-actions-row">
@@ -905,6 +1096,13 @@ export default function App() {
                     >
                       Сбросить устройство
                     </button>
+                    <button
+                      type="button"
+                      className="ghost"
+                      onClick={() => setExpandedUserId(item.id)}
+                    >
+                      Настройки
+                    </button>
                   </div>
                 </article>
               ))}
@@ -912,7 +1110,9 @@ export default function App() {
             </div>
           ) : null}
         </section>
+        ) : null}
 
+        {adminTab === 'logs' ? (
         <section className="panel">
           <h3>Логи сервера</h3>
 
@@ -971,6 +1171,33 @@ export default function App() {
             </div>
           ) : null}
         </section>
+        ) : null}
+
+        {expandedUserId ? (() => {
+          const targetUser = adminUsers.find(item => item.id === expandedUserId);
+          if (!targetUser) return null;
+
+          return (
+            <div className="modal-backdrop" onClick={() => setExpandedUserId('')}>
+              <div className="modal-card" onClick={event => event.stopPropagation()}>
+                <h3>Настройки аккаунта: {targetUser.login}</h3>
+                <div className="line mini">Статус: {formatSubscriptionStatusLabel(targetUser)}</div>
+                <div className="line mini">Устройство: {targetUser.deviceBound ? 'Привязано' : 'Не привязано'}</div>
+                <div className="line mini">Дата регистрации: {formatStartDate(targetUser.createdAt)}</div>
+
+                <button
+                  type="button"
+                  className="danger"
+                  onClick={() => deleteUserAccount(targetUser.id)}
+                  disabled={targetUser.isAdmin || deletingUserId === targetUser.id}
+                >
+                  {deletingUserId === targetUser.id ? 'Удаление...' : 'Удалить аккаунт'}
+                </button>
+                <button type="button" className="ghost" onClick={() => setExpandedUserId('')}>Закрыть</button>
+              </div>
+            </div>
+          );
+        })() : null}
       </div>
     );
   }
@@ -1014,7 +1241,10 @@ export default function App() {
             <h2>Локалка</h2>
             <p>Пользователь: {user?.login || '-'}</p>
           </div>
-          <button type="button" onClick={() => handleLogout()} className="ghost">Выйти</button>
+          <div className="home-header-actions">
+            <button type="button" className="ghost" onClick={openSettings}>Настройки</button>
+            <button type="button" onClick={() => handleLogout()} className="ghost">Выйти</button>
+          </div>
         </header>
 
         {error ? <section className="status error">{error}</section> : null}
@@ -1068,6 +1298,27 @@ export default function App() {
             ))}
           </div>
         </section>
+
+        {settingsOpen ? (
+          <div className="modal-backdrop" onClick={closeSettings}>
+            <div className="modal-card" onClick={event => event.stopPropagation()}>
+              <h3>Настройки</h3>
+              <div className="line mini">Подписка: {formatSubscriptionStatusLabel(user)}</div>
+              <label className="settings-field">
+                Просчитывающий по умолчанию
+                <input
+                  value={defaultCounterNameInput}
+                  onChange={event => setDefaultCounterNameInput(event.target.value)}
+                  placeholder="Имя, которое будет подставляться автоматически"
+                />
+              </label>
+              <button type="button" onClick={saveAccountSettings} disabled={settingsSaving}>
+                {settingsSaving ? 'Сохранение...' : 'Сохранить'}
+              </button>
+              <button type="button" className="ghost" onClick={closeSettings}>Закрыть</button>
+            </div>
+          </div>
+        ) : null}
       </div>
     );
   }
@@ -1084,6 +1335,18 @@ export default function App() {
             <span>{loading ? 'Подождите...' : scannerStatus}</span>
             <span className="scanner-last">{lastCode || `Документ: ${activeRecount.docId}`}</span>
           </div>
+          {unresolvedBarcode ? (
+            <div className="scanner-unresolved">
+              <span>
+                {candidateCodes.length > 1
+                  ? `Штрихкод ${unresolvedBarcode}: несколько вариантов товара`
+                  : `Штрихкод ${unresolvedBarcode} не найден`}
+              </span>
+              <button type="button" onClick={openBindModal}>
+                {candidateCodes.length > 1 ? 'Выбрать товар' : 'Привязать вручную'}
+              </button>
+            </div>
+          ) : null}
         </header>
 
         <section className="search-block">
@@ -1092,6 +1355,16 @@ export default function App() {
             onChange={event => setSearch(event.target.value)}
             placeholder="Поиск по артикулу или названию"
           />
+          {search ? (
+            <button
+              type="button"
+              className="search-clear-btn"
+              aria-label="Очистить поиск"
+              onClick={() => setSearch('')}
+            >
+              ✕
+            </button>
+          ) : null}
         </section>
 
         {error ? <section className="status error">{error}</section> : null}
@@ -1144,7 +1417,7 @@ export default function App() {
           Расхождения ({mismatchItems.length})
         </button>
         <button type="button" onClick={() => {
-          setCompleteModalOpen(true);
+          openCompleteModal();
           setMenuOpen(false);
         }}>
           Завершить
@@ -1244,10 +1517,68 @@ export default function App() {
                 checked={includeTotalSummary}
                 onChange={event => setIncludeTotalSummary(event.target.checked)}
               />
-              Показать общую сумму (+/-)
+              Свести -/+
             </label>
+            {activeRecount?.completedAt ? (
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={updateCompletionTime}
+                  onChange={event => setUpdateCompletionTime(event.target.checked)}
+                />
+                Обновить время просчета
+              </label>
+            ) : null}
             <button type="button" onClick={handleCompleteRecount} disabled={loading}>Скачать итоговый PDF и завершить</button>
+            <button type="button" className="ghost" onClick={handleFinishWithoutPdf} disabled={loading}>Выйти в меню</button>
             <button type="button" className="ghost" onClick={() => setCompleteModalOpen(false)}>Отмена</button>
+          </div>
+        </div>
+      ) : null}
+
+      {bindModalOpen ? (
+        <div className="modal-backdrop" onClick={closeBindModal}>
+          <div className="modal-card" onClick={event => event.stopPropagation()}>
+            <h3>Привязать штрихкод {unresolvedBarcode}</h3>
+            {candidateItems.length ? (
+              <>
+                <div className="line mini">Ранее встречались варианты:</div>
+                <div className="bind-item-list">
+                  {candidateItems.map(item => (
+                    <button
+                      key={`candidate-${item.code}`}
+                      type="button"
+                      className="bind-item-row"
+                      onClick={() => bindBarcodeToItem(item.code)}
+                    >
+                      <span className="bind-item-code">{item.code}</span>
+                      <span className="bind-item-name">{item.name}</span>
+                    </button>
+                  ))}
+                </div>
+              </>
+            ) : null}
+            <input
+              value={bindSearch}
+              onChange={event => setBindSearch(event.target.value)}
+              placeholder="Найдите товар по артикулу или названию"
+              autoFocus
+            />
+            <div className="bind-item-list">
+              {!bindFilteredItems.length ? <div className="status">Товары не найдены</div> : null}
+              {bindFilteredItems.map(item => (
+                <button
+                  key={item.code}
+                  type="button"
+                  className="bind-item-row"
+                  onClick={() => bindBarcodeToItem(item.code)}
+                >
+                  <span className="bind-item-code">{item.code}</span>
+                  <span className="bind-item-name">{item.name}</span>
+                </button>
+              ))}
+            </div>
+            <button type="button" className="ghost" onClick={closeBindModal}>Отмена</button>
           </div>
         </div>
       ) : null}

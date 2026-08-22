@@ -5,6 +5,7 @@ client/dist/
 server/.env
 .env
 server/storage.json
+server/barcode-cache.json
 *.log
 .DS_Store
 Thumbs.db

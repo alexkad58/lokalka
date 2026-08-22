@@ -109,6 +109,23 @@ export async function resetUserDeviceBinding(userId) {
   return readJsonOrThrow(response, 'Не удалось сбросить привязку устройства');
 }
 
+export async function deleteAdminUser(userId) {
+  const response = await fetch(`/api/admin/users/${encodeURIComponent(userId)}`, {
+    method: 'DELETE',
+    headers: authHeaders()
+  });
+  return readJsonOrThrow(response, 'Не удалось удалить пользователя');
+}
+
+export async function updateAccountSettings(payload) {
+  const response = await fetch('/api/account/settings', {
+    method: 'POST',
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify(payload)
+  });
+  return readJsonOrThrow(response, 'Не удалось сохранить настройки');
+}
+
 export async function getRecounts() {
   const response = await fetch('/api/recounts', {
     headers: authHeaders()
@@ -184,4 +201,13 @@ export async function resolveBarcode(barcode, itemCodes = []) {
   });
 
   return readJsonOrThrow(response, 'Не удалось обработать штрихкод');
+}
+
+export async function finishRecountWithoutPdf(id, payload) {
+  const response = await fetch(`/api/recounts/${encodeURIComponent(id)}/complete`, {
+    method: 'POST',
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ ...payload, withoutPdf: true })
+  });
+  return readJsonOrThrow(response, 'Не удалось завершить просчет');
 }

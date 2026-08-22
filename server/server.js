@@ -27,6 +27,7 @@ const MAX_FILE_SIZE = 50 * 1024 * 1024;
 const AUTOSAVE_MIN_INTERVAL_MS = 3000;
 const barcodeResolutionCache = new Map();
 const DATA_FILE_URL = new URL('./storage.json', import.meta.url);
+const BARCODE_CACHE_FILE_URL = new URL('./barcode-cache.json', import.meta.url);
 const TOKEN_STORAGE_KEY = 'bearer';
 const ADMIN_LOGIN = normalizeLogin(process.env.ADMIN_LOGIN || 'admin');
 const ADMIN_PASSWORD = String(process.env.ADMIN_PASSWORD || 'admin');
@@ -243,6 +244,39 @@ async function saveDb() {
   await writeFile(DATA_FILE_URL, JSON.stringify(db, null, 2), 'utf8');
 }
 
+async function loadBarcodeResolutionCache() {
+  try {
+    const raw = await readFile(BARCODE_CACHE_FILE_URL, 'utf8');
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object') {
+      for (const [barcode, record] of Object.entries(parsed)) {
+        if (!record || typeof record !== 'object') continue;
+
+        // Migrate legacy single-code entries into the codes-array shape.
+        const codes = Array.isArray(record.codes)
+          ? record.codes.map(String)
+          : (record.code ? [String(record.code)] : []);
+
+        barcodeResolutionCache.set(barcode, {
+          codes: Array.from(new Set(codes)),
+          source: record.source || 'cache',
+          product: record.product || null,
+          updatedAt: record.updatedAt || Date.now()
+        });
+      }
+    }
+  } catch {
+    // File may not exist yet on first run, start with an empty cache.
+  }
+}
+
+function persistBarcodeResolutionCache() {
+  const payload = Object.fromEntries(barcodeResolutionCache.entries());
+  writeFile(BARCODE_CACHE_FILE_URL, JSON.stringify(payload, null, 2), 'utf8').catch(error => {
+    logEvent('error', 'barcode-cache-save-failed', { message: error?.message || String(error) });
+  });
+}
+
 function publicUser(user) {
   return {
     id: user.id,
@@ -251,7 +285,8 @@ function publicUser(user) {
     isAdmin: Boolean(user.isAdmin),
     subscriptionUntil: user.subscriptionUntil || null,
     subscriptionActive: hasActiveSubscription(user),
-    deviceBound: Boolean(user.deviceId)
+    deviceBound: Boolean(user.deviceId),
+    defaultCounterName: user.defaultCounterName || ''
   };
 }
 
@@ -625,6 +660,7 @@ function sanitizeActiveRecount(recount) {
     storeAddress: recount.storeAddress || '',
     createdAt: recount.createdAt,
     updatedAt: recount.updatedAt,
+    completedAt: recount.completedAt || null,
     items: recount.items || [],
     values: recount.values || {},
     search: recount.search || '',
@@ -758,25 +794,30 @@ async function buildPdfBufferFromRecount(recount, options) {
     width: leftSummaryWidth,
     align: 'left'
   });
-  doc.fontSize(9).text(`+ ${formatMoney(tableData.plusSum)}`, doc.page.margins.left, summaryTopY + 12, {
-    width: leftSummaryWidth,
-    align: 'left'
-  });
 
-  let summaryBottomY = summaryTopY + 24;
+  // "\u0421\u0432\u0435\u0441\u0442\u0438 -/+": off shows only the shortage total, on nets plus against minus.
+  let totalLineY = summaryTopY + 12;
   if (includeTotalSummary) {
-    doc.fontSize(9).text(`Итого: ${formatMoney(tableData.totalSum)}`, doc.page.margins.left, summaryTopY + 24, {
+    doc.fontSize(9).text(`+ ${formatMoney(tableData.plusSum)}`, doc.page.margins.left, totalLineY, {
       width: leftSummaryWidth,
       align: 'left'
     });
-    summaryBottomY = summaryTopY + 36;
+    totalLineY += 12;
   }
 
-  const counterLineY = includeTotalSummary ? summaryTopY + 16 : summaryTopY + 8;
+  const totalValue = includeTotalSummary ? tableData.totalSum : -tableData.minusSum;
+  doc.fontSize(9).text(`Итого: ${formatMoney(totalValue)}`, doc.page.margins.left, totalLineY, {
+    width: leftSummaryWidth,
+    align: 'left'
+  });
+  const summaryBottomY = totalLineY + 12;
+
+  const counterLineY = totalLineY;
   doc.fontSize(9).text(`Считал: ${String(options.counterName || '-')}`, rightSummaryX, counterLineY, {
     width: rightSummaryWidth,
     align: 'left'
   });
+
 
   const signLineStartX = rightSummaryX + 52;
   const signLineEndX = rightSummaryX + rightSummaryWidth;
@@ -1495,9 +1536,23 @@ async function resolveBarcodeFromShopApi(barcode) {
   }
 }
 
+function addBarcodeResolutionCode(barcode, code, source, product) {
+  const existing = barcodeResolutionCache.get(barcode);
+  const codes = new Set(existing?.codes || []);
+  codes.add(String(code));
+
+  barcodeResolutionCache.set(barcode, {
+    codes: Array.from(codes),
+    source: source || existing?.source || 'cache',
+    product: product || existing?.product || null,
+    updatedAt: Date.now()
+  });
+  persistBarcodeResolutionCache();
+}
+
 function buildRecountCache(items) {
   const itemByCode = {};
-  const barcodeToCode = {};
+  const barcodeToCodes = {};
 
   for (const item of items) {
     itemByCode[String(item.code)] = {
@@ -1510,13 +1565,14 @@ function buildRecountCache(items) {
   }
 
   for (const [barcode, record] of barcodeResolutionCache.entries()) {
-    if (record?.code && itemByCode[record.code]) {
-      barcodeToCode[barcode] = record.code;
+    const codes = (record?.codes || []).filter(code => itemByCode[code]);
+    if (codes.length) {
+      barcodeToCodes[barcode] = codes;
     }
   }
 
   return {
-    barcodeToCode,
+    barcodeToCodes,
     itemByCode,
     builtAt: new Date().toISOString()
   };
@@ -1688,6 +1744,25 @@ app.get('/api/auth/me', { preHandler: authenticate }, async request => {
   };
 });
 
+app.post('/api/account/settings', { preHandler: authenticate }, async (request, reply) => {
+  const body = request.body && typeof request.body === 'object' ? request.body : {};
+
+  if (typeof body.defaultCounterName === 'string') {
+    request.user.defaultCounterName = body.defaultCounterName.trim().slice(0, 120);
+  }
+
+  await saveDb();
+
+  logEvent('info', 'account-settings-updated', buildRequestLogMeta(request, {
+    defaultCounterName: request.user.defaultCounterName || null
+  }));
+
+  return {
+    ok: true,
+    user: publicUser(request.user)
+  };
+});
+
 app.get('/api/admin/users', { preHandler: [authenticate, requireAdmin] }, async request => {
   const users = db.users
     .slice()
@@ -1849,6 +1924,40 @@ app.post('/api/admin/users/:id/device/reset', { preHandler: [authenticate, requi
   };
 });
 
+app.delete('/api/admin/users/:id', { preHandler: [authenticate, requireAdmin] }, async (request, reply) => {
+  const { id } = request.params;
+  const target = db.users.find(user => user.id === id);
+
+  if (!target) {
+    return reply.code(404).send({ ok: false, error: 'Пользователь не найден' });
+  }
+
+  if (target.isAdmin) {
+    logEvent('warn', 'admin-delete-user-blocked', buildRequestLogMeta(request, { targetUserId: id }));
+    return reply.code(400).send({ ok: false, error: 'Нельзя удалить администратора' });
+  }
+
+  db.users = db.users.filter(user => user.id !== target.id);
+  db.recounts = db.recounts.filter(item => item.userId !== target.id);
+
+  for (const [token, session] of sessions.entries()) {
+    if (session?.userId === target.id) {
+      sessions.delete(token);
+    }
+  }
+  db.sessions = (Array.isArray(db.sessions) ? db.sessions : [])
+    .filter(session => session.userId !== target.id);
+
+  await saveDb();
+
+  logEvent('warn', 'admin-delete-user-success', buildRequestLogMeta(request, {
+    targetUserId: target.id,
+    targetLogin: target.login
+  }));
+
+  return { ok: true };
+});
+
 app.post('/api/auth/logout', { preHandler: authenticate }, async request => {
   logEvent('info', 'logout', buildRequestLogMeta(request));
   if (request.authToken) {
@@ -1915,7 +2024,7 @@ app.post('/api/recounts/:id/reopen', { preHandler: [authenticate, requireService
   }
 
   recount.status = 'active';
-  recount.completedAt = null;
+  // Keep completedAt from the previous cycle so "update recount time" off can restore it on re-complete.
   recount.updatedAt = toIsoNow();
   await saveDb();
 
@@ -2053,11 +2162,13 @@ app.post('/api/recounts/:id/progress', { preHandler: [authenticate, requireServi
 app.post('/api/recounts/:id/complete', { preHandler: [authenticate, requireServiceAccess] }, async (request, reply) => {
   const { id } = request.params;
   const body = request.body && typeof request.body === 'object' ? request.body : {};
+  const withoutPdf = Boolean(body.withoutPdf);
+  const updateCompletionTime = body.updateCompletionTime === undefined ? true : Boolean(body.updateCompletionTime);
   const counterName = String(body.counterName || '').trim();
   const groupName = String(body.groupName || '').trim();
   const includeTotalSummary = Boolean(body.includeTotalSummary);
 
-  if (!counterName || !groupName) {
+  if (!withoutPdf && (!counterName || !groupName)) {
     logEvent('warn', 'recount-complete-missing-fields', buildRequestLogMeta(request, {
       recountId: id,
       hasCounterName: Boolean(counterName),
@@ -2080,6 +2191,24 @@ app.post('/api/recounts/:id/complete', { preHandler: [authenticate, requireServi
     return reply.code(409).send({ ok: false, error: 'Просчет уже завершен' });
   }
 
+  if (withoutPdf) {
+    recount.status = 'completed';
+    recount.completedAt = updateCompletionTime ? toIsoNow() : (recount.completedAt || toIsoNow());
+    recount.updatedAt = toIsoNow();
+    await saveDb();
+
+    logEvent('info', 'recount-complete-without-pdf', buildRequestLogMeta(request, {
+      recountId: recount.id,
+      docId: recount.docId,
+      updateCompletionTime
+    }));
+
+    return {
+      ok: true,
+      recount: sanitizeActiveRecount(recount)
+    };
+  }
+
   if (body.values && typeof body.values === 'object') {
     const normalizedValues = {};
     for (const [key, value] of Object.entries(body.values)) {
@@ -2099,7 +2228,7 @@ app.post('/api/recounts/:id/complete', { preHandler: [authenticate, requireServi
   recount.counterName = counterName;
   recount.groupName = groupName;
   recount.status = 'completed';
-  recount.completedAt = toIsoNow();
+  recount.completedAt = updateCompletionTime ? toIsoNow() : (recount.completedAt || toIsoNow());
   recount.updatedAt = toIsoNow();
   await saveDb();
 
@@ -2108,7 +2237,8 @@ app.post('/api/recounts/:id/complete', { preHandler: [authenticate, requireServi
     docId: recount.docId,
     counterName,
     groupName,
-    includeTotalSummary
+    includeTotalSummary,
+    updateCompletionTime
   }));
 
   const pdfBuffer = await buildPdfBufferFromRecount(recount, {
@@ -2142,10 +2272,10 @@ app.post('/api/recount/resolve-barcode', { preHandler: [authenticate, requireSer
   }
 
   const cached = barcodeResolutionCache.get(barcode);
-  if (cached) {
+  if (cached?.codes?.length) {
     logEvent('info', 'resolve-barcode-cache-hit', {
       barcode,
-      code: cached.code,
+      codes: cached.codes,
       source: cached.source || 'cache'
     });
 
@@ -2154,7 +2284,7 @@ app.post('/api/recount/resolve-barcode', { preHandler: [authenticate, requireSer
       resolved: true,
       fromCache: true,
       barcode,
-      code: cached.code,
+      codes: cached.codes,
       source: cached.source || 'cache',
       product: cached.product || null
     };
@@ -2166,12 +2296,7 @@ app.post('/api/recount/resolve-barcode', { preHandler: [authenticate, requireSer
   if (shopResult.resolved && shopResult.code) {
     const code = String(shopResult.code);
     const product = shopResult.payload?.product || shopResult.payload?.item || null;
-    barcodeResolutionCache.set(barcode, {
-      code,
-      source: shopResult.source,
-      product,
-      updatedAt: Date.now()
-    });
+    addBarcodeResolutionCode(barcode, code, shopResult.source, product);
 
     logEvent('info', 'resolve-barcode-shop-success', {
       barcode,
@@ -2184,7 +2309,7 @@ app.post('/api/recount/resolve-barcode', { preHandler: [authenticate, requireSer
       resolved: true,
       fromCache: false,
       barcode,
-      code,
+      codes: [code],
       source: shopResult.source,
       product
     };
@@ -2192,12 +2317,7 @@ app.post('/api/recount/resolve-barcode', { preHandler: [authenticate, requireSer
 
   // Fallback: for cases where barcode and article are identical in a document.
   if (itemCodes.includes(barcode)) {
-    barcodeResolutionCache.set(barcode, {
-      code: barcode,
-      source: 'item-code-fallback',
-      product: null,
-      updatedAt: Date.now()
-    });
+    addBarcodeResolutionCode(barcode, barcode, 'item-code-fallback', null);
 
     logEvent('info', 'resolve-barcode-fallback', {
       barcode,
@@ -2209,7 +2329,7 @@ app.post('/api/recount/resolve-barcode', { preHandler: [authenticate, requireSer
       resolved: true,
       fromCache: false,
       barcode,
-      code: barcode,
+      codes: [barcode],
       source: 'item-code-fallback',
       product: null
     };
@@ -2226,7 +2346,7 @@ app.post('/api/recount/resolve-barcode', { preHandler: [authenticate, requireSer
     resolved: false,
     fromCache: false,
     barcode,
-    code: null,
+    codes: [],
     source: shopResult.source || 'not-found',
     product: null
   };
@@ -2269,6 +2389,7 @@ app.post('/api/recount/parse-pdf', { preHandler: authenticate }, async (request,
 
 async function startServer() {
   await loadDb();
+  await loadBarcodeResolutionCache();
   logShopApiStartupConfig();
   await app.listen({ port: Number(process.env.PORT || 3000), host: '0.0.0.0' });
   startTsdBotProcess();

@@ -42,4 +42,4 @@ jobs:
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
         run: |
           ssh -p "${DEPLOY_PORT:-22}" "${DEPLOY_USER}@${DEPLOY_HOST}" \
-            "cd ${DEPLOY_PATH:-/var/www/lokalka} && ./deploy.sh"
+            "cd ${DEPLOY_PATH:-/var/www/lokalka} && chmod +x deploy.sh && bash ./deploy.sh"

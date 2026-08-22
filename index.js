@@ -155,21 +155,25 @@ async function buildPdfBufferFromRecount(recount, options) {
 		width: leftSummaryWidth,
 		align: 'left'
 	});
-	doc.fontSize(9).text(`+ ${formatMoney(tableData.plusSum)}`, doc.page.margins.left, summaryTopY + 12, {
-		width: leftSummaryWidth,
-		align: 'left'
-	});
 
-	let summaryBottomY = summaryTopY + 24;
+	// "Свести -/+": off shows only the shortage total, on nets plus against minus.
+	let totalLineY = summaryTopY + 12;
 	if (includeTotalSummary) {
-		doc.fontSize(9).text(`Итого: ${formatMoney(tableData.totalSum)}`, doc.page.margins.left, summaryTopY + 24, {
+		doc.fontSize(9).text(`+ ${formatMoney(tableData.plusSum)}`, doc.page.margins.left, totalLineY, {
 			width: leftSummaryWidth,
 			align: 'left'
 		});
-		summaryBottomY = summaryTopY + 36;
+		totalLineY += 12;
 	}
 
-	const counterLineY = includeTotalSummary ? summaryTopY + 16 : summaryTopY + 8;
+	const totalValue = includeTotalSummary ? tableData.totalSum : -tableData.minusSum;
+	doc.fontSize(9).text(`Итого: ${formatMoney(totalValue)}`, doc.page.margins.left, totalLineY, {
+		width: leftSummaryWidth,
+		align: 'left'
+	});
+	const summaryBottomY = totalLineY + 12;
+
+	const counterLineY = totalLineY;
 	doc.fontSize(9).text(`Считал: ${String(options.counterName || '-')}`, rightSummaryX, counterLineY, {
 		width: rightSummaryWidth,
 		align: 'left'
