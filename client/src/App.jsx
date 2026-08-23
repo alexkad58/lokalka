@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import QRCode from 'qrcode';
+import bwipjs from 'bwip-js';
 import {
   activateUserSubscription,
   completeRecount,
@@ -23,6 +25,7 @@ import {
 
 const TOKEN_KEY = 'lokalka_auth_token';
 const BARCODE_CACHE_STORAGE_KEY = 'barcode_article_cache_v1';
+const FEEDBACK_SOUND_STORAGE_KEY = 'lokalka_feedback_sound_enabled';
 const AUTOSAVE_INTERVAL_MS = 8000;
 const ADMIN_LOG_LEVEL_TABS = [
   { key: 'all', label: 'Все' },
@@ -114,8 +117,105 @@ function supportsBarcodeDetector() {
   return typeof window !== 'undefined' && 'BarcodeDetector' in window;
 }
 
+let feedbackAudioContext = null;
+
+function unlockFeedbackAudio() {
+  if (typeof window === 'undefined' || localStorage.getItem(FEEDBACK_SOUND_STORAGE_KEY) === '0') return;
+
+  try {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) return;
+    if (!feedbackAudioContext) feedbackAudioContext = new AudioContextClass();
+    if (feedbackAudioContext.state === 'suspended') void feedbackAudioContext.resume();
+  } catch {
+    // Audio feedback is optional.
+  }
+}
+
+function playFeedbackSound(kind = 'scan') {
+  if (typeof window === 'undefined') return;
+
+  try {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) return;
+
+    if (!feedbackAudioContext) feedbackAudioContext = new AudioContextClass();
+    const context = feedbackAudioContext;
+    const playTone = () => {
+      const oscillator = context.createOscillator();
+      const gain = context.createGain();
+      const startTime = context.currentTime;
+
+      const isScan = kind === 'scan';
+      oscillator.type = isScan ? 'sine' : 'triangle';
+      oscillator.frequency.setValueAtTime(isScan ? 1320 : 190, startTime);
+      gain.gain.setValueAtTime(isScan ? 0.04 : 0.06, startTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, startTime + (isScan ? 0.06 : 0.035));
+      oscillator.connect(gain);
+      gain.connect(context.destination);
+      oscillator.start(startTime);
+      oscillator.stop(startTime + (isScan ? 0.065 : 0.04));
+    };
+
+    if (context.state === 'suspended') {
+      void context.resume().then(playTone);
+    } else {
+      playTone();
+    }
+  } catch {
+    // Audio feedback is optional.
+  }
+}
+
+function triggerHaptic(duration = 50, soundKind = 'scan') {
+  let vibrated = false;
+
+  if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
+    try {
+      vibrated = navigator.vibrate(duration) === true;
+    } catch {
+      vibrated = false;
+    }
+  }
+
+  if (localStorage.getItem(FEEDBACK_SOUND_STORAGE_KEY) !== '0') {
+    playFeedbackSound(soundKind);
+  }
+  return vibrated;
+}
+
 function normalizeBarcodeValue(value) {
   return String(value || '').trim();
+}
+
+function formatTsdDate(dateValue = new Date()) {
+  const date = dateValue instanceof Date ? dateValue : new Date(dateValue);
+  return date.toLocaleDateString('ru-RU', {
+    day: '2-digit',
+    month: '2-digit',
+    year: '2-digit'
+  });
+}
+
+function normalizeTsdPrice(value) {
+  const normalized = String(value || '').trim().replace(',', '.');
+  if (!/^\d+(?:\.\d{1,2})?$/.test(normalized)) return '';
+  return Number(normalized).toFixed(2);
+}
+
+function parseTsdQr(value) {
+  const parts = String(value || '').trim().split(';');
+  if (parts[0] !== 'CEN' || parts.length < 6) return null;
+
+  const price = normalizeTsdPrice(parts[2]);
+  if (!parts[1] || !price || !parts[5]) return null;
+
+  return {
+    raw: String(value).trim(),
+    barcode: parts[1],
+    price,
+    date: parts[5]
+  };
 }
 
 function loadBarcodeCache() {
@@ -192,6 +292,17 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [defaultCounterNameInput, setDefaultCounterNameInput] = useState('');
   const [settingsSaving, setSettingsSaving] = useState(false);
+  const [feedbackSoundEnabled, setFeedbackSoundEnabled] = useState(() => (
+    localStorage.getItem(FEEDBACK_SOUND_STORAGE_KEY) !== '0'
+  ));
+  const [tsdOpen, setTsdOpen] = useState(() => (
+    typeof window !== 'undefined' && window.location.pathname === '/tsd'
+  ));
+  const [tsdPriceModalOpen, setTsdPriceModalOpen] = useState(false);
+  const [tsdPriceInput, setTsdPriceInput] = useState('');
+  const [tsdResult, setTsdResult] = useState(null);
+  const [tsdQrDataUrl, setTsdQrDataUrl] = useState('');
+  const [tsdBarcodeDataUrl, setTsdBarcodeDataUrl] = useState('');
 
   const fileInputRef = useRef(null);
   const videoRef = useRef(null);
@@ -206,11 +317,97 @@ export default function App() {
   const barcodeCacheRef = useRef(barcodeCache);
   const flashTimeoutRef = useRef(0);
   const autosaveSnapshotRef = useRef('');
+  const itemsFeedRef = useRef(null);
+  const itemCardRefs = useRef(new Map());
+  const keypadRef = useRef(null);
+
+  useEffect(() => {
+    if (!activeFactCode) return undefined;
+
+    const scrollActiveCard = () => {
+      const feed = itemsFeedRef.current;
+      const card = itemCardRefs.current.get(activeFactCode);
+      const keypad = keypadRef.current;
+      if (!feed || !card || !keypad) return;
+
+      const cardRect = card.getBoundingClientRect();
+      const keypadRect = keypad.getBoundingClientRect();
+      const scrollDelta = cardRect.bottom - keypadRect.top;
+
+      feed.scrollTo({
+        top: Math.max(0, feed.scrollTop + scrollDelta),
+        behavior: 'smooth'
+      });
+    };
+
+    const delayedScroll = window.setTimeout(scrollActiveCard, 120);
+
+    return () => {
+      window.clearTimeout(delayedScroll);
+    };
+  }, [activeFactCode]);
+
+  useEffect(() => {
+    const handlePopState = () => {
+      setTsdOpen(window.location.pathname === '/tsd');
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
+
+  useEffect(() => {
+    if (!tsdResult?.raw) {
+      setTsdQrDataUrl('');
+      return undefined;
+    }
+
+    let cancelled = false;
+    QRCode.toDataURL(tsdResult.raw, { margin: 1, width: 320 })
+      .then(dataUrl => {
+        if (!cancelled) setTsdQrDataUrl(dataUrl);
+      })
+      .catch(() => {
+        if (!cancelled) setTsdQrDataUrl('');
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [tsdResult]);
+
+  useEffect(() => {
+    if (!tsdResult?.barcode) {
+      setTsdBarcodeDataUrl('');
+      return undefined;
+    }
+
+    try {
+      const canvas = document.createElement('canvas');
+      bwipjs.toCanvas(canvas, {
+        bcid: 'code128',
+        text: tsdResult.barcode,
+        scale: 3,
+        height: 12,
+        includetext: true,
+        textxalign: 'center'
+      });
+      setTsdBarcodeDataUrl(canvas.toDataURL('image/png'));
+    } catch {
+      setTsdBarcodeDataUrl('');
+    }
+
+    return undefined;
+  }, [tsdResult]);
 
   useEffect(() => {
     saveBarcodeCache(barcodeCache);
     barcodeCacheRef.current = barcodeCache;
   }, [barcodeCache]);
+
+  useEffect(() => {
+    localStorage.setItem(FEEDBACK_SOUND_STORAGE_KEY, feedbackSoundEnabled ? '1' : '0');
+  }, [feedbackSoundEnabled]);
 
   useEffect(() => {
     return () => {
@@ -606,6 +803,11 @@ export default function App() {
     lastCodeTsRef.current = now;
     setLastCode(code);
 
+    if (tsdOpen) {
+      handleTsdScan(code);
+      return;
+    }
+
     try {
       setScannerStatus('Поиск артикула...');
       const resolved = await resolveBarcodeWithCache(code);
@@ -634,7 +836,66 @@ export default function App() {
       setCandidateCodes([]);
     }
 
-    if (navigator.vibrate) navigator.vibrate(70);
+    triggerHaptic(70, 'scan');
+  }
+
+  function handleTsdScan(code) {
+    const qrResult = parseTsdQr(code);
+    if (String(code).trim().startsWith('CEN;')) {
+      if (!qrResult) {
+        setScannerStatus('Неверный формат CEN');
+        return;
+      }
+      setTsdResult({ ...qrResult, generated: false });
+      setScannerStatus('QR-код считан');
+      triggerScanSuccessFlash();
+      triggerHaptic(70, 'scan');
+      return;
+    }
+
+    setTsdPriceInput('');
+    setTsdPriceModalOpen(true);
+    setTsdResult({ raw: '', barcode: String(code).trim(), price: '', date: '', generated: true });
+    setScannerStatus('Введите цену товара');
+    triggerHaptic(70, 'scan');
+  }
+
+  function confirmTsdPrice() {
+    const price = normalizeTsdPrice(tsdPriceInput);
+    if (!price || !tsdResult?.barcode) {
+      setError('Введите цену в формате 00.00 или 00,00');
+      return;
+    }
+
+    const raw = `CEN;${tsdResult.barcode};${price};1;6;${formatTsdDate()}`;
+    setTsdResult({
+      raw,
+      barcode: tsdResult.barcode,
+      price,
+      date: formatTsdDate(),
+      generated: true
+    });
+    setTsdPriceModalOpen(false);
+    setError('');
+    setScannerStatus('QR-код сформирован');
+    triggerScanSuccessFlash();
+  }
+
+  function openTsd() {
+    stopScanner();
+    window.history.pushState({}, '', '/tsd');
+    setTsdOpen(true);
+    setTsdResult(null);
+    setTsdPriceModalOpen(false);
+    setScannerStatus('Сканер выключен');
+  }
+
+  function closeTsd() {
+    stopScanner();
+    window.history.replaceState({}, '', '/');
+    setTsdOpen(false);
+    setTsdResult(null);
+    setTsdPriceModalOpen(false);
   }
 
   function openBindModal() {
@@ -669,7 +930,7 @@ export default function App() {
     setCandidateCodes([]);
     closeBindModal();
     triggerScanSuccessFlash();
-    if (navigator.vibrate) navigator.vibrate(70);
+    triggerHaptic(70, 'scan');
   }
 
   async function scanBarcodeFrame() {
@@ -693,12 +954,13 @@ export default function App() {
   async function startScanner() {
     const video = videoRef.current;
     if (!video) return;
-    if (!activeRecount?.items?.length) {
+    if (!activeRecount?.items?.length && !tsdOpen) {
       setScannerStatus('Сначала загрузите PDF');
       return;
     }
 
     try {
+      unlockFeedbackAudio();
       setScannerStatus('Запуск камеры...');
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: { ideal: 'environment' } },
@@ -710,7 +972,7 @@ export default function App() {
       await video.play();
 
       if (supportsBarcodeDetector()) {
-        detectorRef.current = new window.BarcodeDetector({ formats: ['code_128', 'ean_13', 'ean_8'] });
+        detectorRef.current = new window.BarcodeDetector({ formats: ['code_128', 'ean_13', 'ean_8', 'qr_code'] });
         setScannerOn(true);
         setScannerStatus('Наведите на штрихкод');
         scanRafRef.current = requestAnimationFrame(scanBarcodeFrame);
@@ -805,7 +1067,7 @@ export default function App() {
 
   function appendToActiveFact(char) {
     if (!activeFactCode) return;
-    if (navigator.vibrate) navigator.vibrate(18);
+    triggerHaptic(18, 'tap');
     const current = String(values[activeFactCode] ?? '');
     if (char === '+') {
       if (!current || current.endsWith('+')) return;
@@ -820,7 +1082,7 @@ export default function App() {
 
   function eraseActiveFact() {
     if (!activeFactCode) return;
-    if (navigator.vibrate) navigator.vibrate(18);
+    triggerHaptic(18, 'tap');
     const current = String(values[activeFactCode] ?? '');
     updateFact(activeFactCode, current.slice(0, -1));
   }
@@ -841,12 +1103,31 @@ export default function App() {
         updateCompletionTime
       });
 
-      const url = URL.createObjectURL(result.blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = result.fileName;
-      link.click();
-      URL.revokeObjectURL(url);
+      const fileName = result.fileName.toLowerCase().endsWith('.pdf')
+        ? result.fileName
+        : `${result.fileName}.pdf`;
+      const pdfFile = new File([result.blob], fileName, { type: 'application/pdf' });
+      const url = URL.createObjectURL(pdfFile);
+
+      if (navigator.share && navigator.canShare?.({ files: [pdfFile] })) {
+        try {
+          await navigator.share({
+            files: [pdfFile],
+            title: fileName
+          });
+        } catch (shareError) {
+          if (shareError?.name !== 'AbortError') {
+            console.warn('Не удалось поделиться PDF', shareError);
+          }
+        }
+      } else {
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = fileName;
+        link.click();
+      }
+
+      window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
 
       setCompleteModalOpen(false);
       setCounterName('');
@@ -976,7 +1257,7 @@ export default function App() {
     }
   }
 
-  if (!token) {
+  if (!token && !tsdOpen) {
     return (
       <div className="auth-page">
         <form className="auth-card" onSubmit={handleAuthSubmit}>
@@ -1208,11 +1489,10 @@ export default function App() {
         <section className="auth-card">
           <h1>Подписка не активна</h1>
           <p>
-            Для доступа к сервису нужна активная подписка.
+            Напишите мне в тг
             {' '}
-            Обратитесь в{' '}
             <a href="https://t.me/alekseikb58" target="_blank" rel="noreferrer">
-              Telegram t.me/alekseikb58
+              @alekseikb58
             </a>{' '}
             для активации аккаунта.
           </p>
@@ -1221,6 +1501,67 @@ export default function App() {
             Выйти
           </button>
         </section>
+      </div>
+    );
+  }
+
+  if (tsdOpen) {
+    return (
+      <div className="tsd-page">
+        <header className={`scanner-shell tsd-scanner ${scanSuccessFlash ? 'scan-success-flash' : ''}`}>
+          <div className={`scanner-viewport ${scannerOn ? 'active' : ''}`}>
+            <video ref={videoRef} autoPlay muted playsInline />
+            <div className="scanner-guide" />
+          </div>
+          <div className="scanner-meta">
+            <span>{scannerStatus}</span>
+            <span className="scanner-last">{lastCode || 'ТСД'}</span>
+          </div>
+        </header>
+
+        <section className="tsd-result">
+          {!tsdResult ? <div className="status">Отсканируйте QR-код или штрихкод</div> : null}
+          {tsdResult ? (
+            <>
+              <div className="tsd-result-code">{tsdResult.raw || tsdResult.barcode}</div>
+              <div className="tsd-code-visuals">
+                {tsdQrDataUrl ? <img src={tsdQrDataUrl} alt="QR-код" /> : null}
+                {tsdBarcodeDataUrl ? <img src={tsdBarcodeDataUrl} alt="Штрихкод" /> : null}
+              </div>
+              <div className="tsd-result-meta">
+                <span>Штрихкод: {tsdResult.barcode}</span>
+                <span>Цена: {tsdResult.price}</span>
+                <span>Дата: {tsdResult.date}</span>
+              </div>
+            </>
+          ) : null}
+        </section>
+
+        <nav className="bottom-actions tsd-actions">
+          <button type="button" className={scannerOn ? 'active' : ''} onClick={toggleScanner}>
+            {scannerOn ? 'Остановить' : 'Сканер'}
+          </button>
+          <button type="button" className={torchOn ? 'active' : ''} onClick={toggleTorch}>Фонарик</button>
+          <button type="button" onClick={closeTsd}>Назад</button>
+        </nav>
+
+        {tsdPriceModalOpen ? (
+          <div className="modal-backdrop" onClick={() => setTsdPriceModalOpen(false)}>
+            <div className="modal-card" onClick={event => event.stopPropagation()}>
+              <h3>Цена товара</h3>
+              <div className="line mini">Штрихкод: {tsdResult?.barcode}</div>
+              <input
+                value={tsdPriceInput}
+                onChange={event => setTsdPriceInput(event.target.value)}
+                inputMode="decimal"
+                placeholder="00.00 или 00,00"
+                autoFocus
+              />
+              <button type="button" onClick={confirmTsdPrice}>Сформировать QR-код</button>
+              <button type="button" className="ghost" onClick={() => setTsdPriceModalOpen(false)}>Отмена</button>
+            </div>
+          </div>
+        ) : null}
       </div>
     );
   }
@@ -1299,6 +1640,8 @@ export default function App() {
           </div>
         </section>
 
+        <button type="button" className="tsd-home-btn" onClick={openTsd}>ТСД</button>
+
         {settingsOpen ? (
           <div className="modal-backdrop" onClick={closeSettings}>
             <div className="modal-card" onClick={event => event.stopPropagation()}>
@@ -1311,6 +1654,14 @@ export default function App() {
                   onChange={event => setDefaultCounterNameInput(event.target.value)}
                   placeholder="Имя, которое будет подставляться автоматически"
                 />
+              </label>
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={feedbackSoundEnabled}
+                  onChange={event => setFeedbackSoundEnabled(event.target.checked)}
+                />
+                Звук сканера и клавиш
               </label>
               <button type="button" onClick={saveAccountSettings} disabled={settingsSaving}>
                 {settingsSaving ? 'Сохранение...' : 'Сохранить'}
@@ -1370,13 +1721,20 @@ export default function App() {
         {error ? <section className="status error">{error}</section> : null}
       </div>
 
-      <main className={`items-feed ${activeFactCode ? 'keypad-open' : ''}`}>
+      <main ref={itemsFeedRef} className={`items-feed ${activeFactCode ? 'keypad-open' : ''}`}>
         {filteredItems.map(item => {
           const row = computeRowState(item, values);
           const packageType = detectPackageType(item.name);
 
           return (
-            <article key={item.code} className={`item-card ${row.status}`}>
+            <article
+              key={item.code}
+              ref={card => {
+                if (card) itemCardRefs.current.set(item.code, card);
+                else itemCardRefs.current.delete(item.code);
+              }}
+              className={`item-card ${row.status}`}
+            >
               <div className="line"><strong>Артикул:</strong> {item.code}</div>
               <div className="line"><strong>Название:</strong> {item.name}</div>
               <div className="line mini">
@@ -1432,7 +1790,7 @@ export default function App() {
       </nav>
 
       {activeFactCode ? (
-        <div className="fact-keypad">
+        <div ref={keypadRef} className="fact-keypad">
           <div className="fact-keypad-grid">
             <button type="button" onMouseDown={event => event.preventDefault()} onClick={() => appendToActiveFact('1')}>1</button>
             <button type="button" onMouseDown={event => event.preventDefault()} onClick={() => appendToActiveFact('2')}>2</button>

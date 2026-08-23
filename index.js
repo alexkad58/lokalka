@@ -78,8 +78,8 @@ function drawCell(doc, x, y, width, height, text, options = {}) {
 	doc.restore();
 	doc.fontSize(options.fontSize || 7);
 	doc.text(String(text ?? ''), x + 2, y + 2, {
-		width: width - 4,
-		height: height - 4,
+		width: width - 2,
+		height: height - 2,
 		align: options.align || 'left'
 	});
 }
@@ -108,9 +108,10 @@ function buildTableRows(recount) {
 			name: item.name,
 			unit: item.unit || '',
 			price: asNumber(item.price).toFixed(2),
-			docQty: docQty || 0,
-			fact: rawExpression || (factNumber === null ? '' : factNumber),
-			delta: delta === null || delta === 0 ? '' : `${delta > 0 ? '+' : ''}${delta}`
+			docPack: '',
+			docUnits: docQty || '',
+			factTotal: factNumber === null ? '' : factNumber,
+			discrepancy: delta === null || delta === 0 ? '' : `${delta > 0 ? '+' : ''}${delta}`
 		});
 
 		index += 1;
@@ -136,148 +137,215 @@ async function buildPdfBufferFromRecount(recount, options) {
 
 	configurePdfFont(doc);
 
-	const includeTotalSummary = Boolean(options.includeTotalSummary);
 	const completedAt = recount.completedAt || toIsoNow();
-	const createdAt = recount.createdAt || toIsoNow();
 	const tableData = buildTableRows(recount);
 
-	doc.fontSize(12).text('Акт контрольно-ревизионной проверки по количеству и качеству', { align: 'center' });
-	doc.fontSize(10).text(`от ${formatRuDate(new Date())} г.`, { align: 'center' });
+	doc.fontSize(10).text('Акт контрольно-ревизионной проверки по количеству и качеству', { align: 'center' });
+	doc.fontSize(8).text(`от ${formatRuDate(new Date())} г.`, { align: 'center' });
 	doc.moveDown(0.3);
 
-	const summaryTopY = doc.y + 8;
-	const pageInnerWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
-	const leftSummaryWidth = Math.floor(pageInnerWidth * 0.55);
-	const rightSummaryX = doc.page.margins.left + leftSummaryWidth + 10;
-	const rightSummaryWidth = pageInnerWidth - leftSummaryWidth - 10;
-
-	doc.fontSize(9).text(`- ${formatMoney(tableData.minusSum)}`, doc.page.margins.left, summaryTopY, {
-		width: leftSummaryWidth,
-		align: 'left'
-	});
-
-	// "Свести -/+": off shows only the shortage total, on nets plus against minus.
-	let totalLineY = summaryTopY + 12;
-	if (includeTotalSummary) {
-		doc.fontSize(9).text(`+ ${formatMoney(tableData.plusSum)}`, doc.page.margins.left, totalLineY, {
-			width: leftSummaryWidth,
-			align: 'left'
-		});
-		totalLineY += 12;
-	}
-
-	const totalValue = includeTotalSummary ? tableData.totalSum : -tableData.minusSum;
-	doc.fontSize(9).text(`Итого: ${formatMoney(totalValue)}`, doc.page.margins.left, totalLineY, {
-		width: leftSummaryWidth,
-		align: 'left'
-	});
-	const summaryBottomY = totalLineY + 12;
-
-	const counterLineY = totalLineY;
-	doc.fontSize(9).text(`Считал: ${String(options.counterName || '-')}`, rightSummaryX, counterLineY, {
-		width: rightSummaryWidth,
-		align: 'left'
-	});
-
-	const signLineStartX = rightSummaryX + 52;
-	const signLineEndX = rightSummaryX + rightSummaryWidth;
-	const firstSignLineY = counterLineY + 14;
-	const secondSignLineY = counterLineY + 30;
+	const commissionTopY = doc.y + 8;
+	const tableLeft = doc.page.margins.left;
+	const tableWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
+	const signLineStartX = tableLeft + Math.round(tableWidth * 0.33);
+	const signLineEndX = tableLeft + tableWidth;
+	const summaryWidth = signLineStartX - tableLeft - 8;
+	const summaryFontSize = 7;
+	const counterName = String(options.counterName || recount.counterName || '-');
+	const includeTotalSummary = Boolean(options.includeTotalSummary);
+	let summaryLineY = commissionTopY;
 
 	doc.save();
 	doc.lineWidth(0.6);
+	doc.fontSize(summaryFontSize).text(`- ${formatMoney(tableData.minusSum)}`, tableLeft, summaryLineY, {
+		width: summaryWidth,
+		align: 'left'
+	});
+	 summaryLineY += 9;
+	if (includeTotalSummary) {
+		doc.text(`+ ${formatMoney(tableData.plusSum)}`, tableLeft, summaryLineY, {
+			width: summaryWidth,
+			align: 'left'
+		});
+		summaryLineY += 9;
+	}
+	doc.text(`Итого: ${formatMoney(includeTotalSummary ? tableData.totalSum : -tableData.minusSum)}`, tableLeft, summaryLineY, {
+		width: summaryWidth,
+		align: 'left'
+	});
+	const commissionTopLineY = commissionTopY + 28;
+	const firstSignLineY = commissionTopLineY + 14;
+	const secondSignLineY = commissionTopLineY + 30;
+	doc.fontSize(summaryFontSize).text('Проверка осуществлялась комиссией в составе:', tableLeft, commissionTopLineY, {
+		width: summaryWidth,
+		align: 'left'
+	});
+	doc.fontSize(summaryFontSize).text(counterName, signLineStartX, firstSignLineY - 8, {
+		width: signLineEndX - signLineStartX,
+		align: 'right'
+	});
 	doc.moveTo(signLineStartX, firstSignLineY).lineTo(signLineEndX, firstSignLineY).stroke();
 	doc.moveTo(signLineStartX, secondSignLineY).lineTo(signLineEndX, secondSignLineY).stroke();
 	doc.restore();
 
-	doc.y = Math.max(summaryBottomY + 6, secondSignLineY) + 6;
-
-	const tableLeft = doc.page.margins.left;
-	const tableWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
+	doc.y = secondSignLineY + 8;
 
 	const storeLabel = recount.storeLabel || '№____ (адрес не определен)';
+	const createdAt = recount.createdAt || toIsoNow();
 	const storeText = `По магазину: ${storeLabel}`;
 	const timeText = `Просчет с ${formatRuTime(createdAt)} по ${formatRuTime(completedAt)}`;
-	const storeInfoY = doc.y;
 	const rightInfoWidth = 190;
 	const leftInfoWidth = tableWidth - rightInfoWidth - 8;
+	const tableHeaderTopHeight = 9;
+	const tableHeaderBottomHeight = 7;
+	const tableHeaderHeight = tableHeaderTopHeight + tableHeaderBottomHeight;
+	const rowHeight = 8.8;
 
-	doc.fontSize(9).text(storeText, tableLeft, storeInfoY, {
-		width: leftInfoWidth,
-		align: 'left'
-	});
-	doc.text(timeText, tableLeft + leftInfoWidth + 8, storeInfoY, {
-		width: rightInfoWidth,
-		align: 'right'
-	});
+	const columns = {
+		index: 16,
+		code: 24,
+		name: tableWidth - (16 + 24 + 24 + 30 + 50 + 101 + 40),
+		unit: 24,
+		price: 30,
+		docPack: 50,
+		factTotal: 101,
+		discrepancy: 40
+	};
 
-	const storeBlockHeight = Math.max(
-		doc.heightOfString(storeText, { width: leftInfoWidth }),
-		doc.heightOfString(timeText, { width: rightInfoWidth })
-	);
-	doc.y = storeInfoY + storeBlockHeight;
+	function drawStoreLine(y) {
+		doc.fontSize(7).text(storeText, tableLeft, y, {
+			width: leftInfoWidth,
+			align: 'left'
+		});
+		doc.text(timeText, tableLeft + leftInfoWidth + 8, y, {
+			width: rightInfoWidth,
+			align: 'right'
+		});
 
-	const tableTopStart = doc.y + 6;
-	const headerHeight = 16;
-	const rowHeight = 12;
+		return y + Math.max(
+			doc.heightOfString(storeText, { width: leftInfoWidth }),
+			doc.heightOfString(timeText, { width: rightInfoWidth })
+		) + 4;
+	}
 
-	const columns = [
-		{ key: 'index', title: '№', width: 18, align: 'center' },
-		{ key: 'code', title: 'Код', width: 34, align: 'center' },
-		{ key: 'name', title: 'Товар', width: 220, align: 'left' },
-		{ key: 'unit', title: 'Размерность', width: 52, align: 'center' },
-		{ key: 'price', title: 'Цена', width: 52, align: 'right' },
-		{ key: 'docQty', title: 'По документам', width: 62, align: 'right' },
-		{ key: 'fact', title: 'Фактически', width: 62, align: 'right' },
-		{ key: 'delta', title: 'Расхождение', width: tableWidth - (18 + 34 + 220 + 52 + 52 + 62 + 62), align: 'right' }
-	];
-
-	function drawHeader(y) {
+	function drawTableHeader(y) {
 		let x = tableLeft;
-		for (const col of columns) {
-			drawCell(doc, x, y, col.width, headerHeight, col.title, { align: 'center', fontSize: 6.5 });
-			x += col.width;
-		}
+		drawCell(doc, x, y, columns.index, tableHeaderHeight, '№', { align: 'center', fontSize: 5.5 });
+		x += columns.index;
+		drawCell(doc, x, y, columns.code, tableHeaderHeight, 'Код', { align: 'center', fontSize: 5.5 });
+		x += columns.code;
+		drawCell(doc, x, y, columns.name, tableHeaderHeight, 'Товар', { align: 'center', fontSize: 5.5 });
+		x += columns.name;
+		drawCell(doc, x, y, columns.unit, tableHeaderHeight, 'Размер-\nность', { align: 'center', fontSize: 5.5 });
+		x += columns.unit;
+		drawCell(doc, x, y, columns.price, tableHeaderHeight, 'Цена', { align: 'center', fontSize: 5.5 });
+		x += columns.price;
+
+		drawCell(doc, x, y, columns.docPack, tableHeaderHeight, 'По документам', { align: 'center', fontSize: 5.5 });
+		x += columns.docPack;
+
+		drawCell(doc, x, y, columns.factTotal, tableHeaderHeight, 'Фактически', { align: 'center', fontSize: 5.5 });
+		x += columns.factTotal;
+
+		drawCell(doc, x, y, columns.discrepancy, tableHeaderHeight, 'Расхождение', { align: 'center', fontSize: 5.5 });
+	}
+
+	function drawPageHeader(y) {
+		const tableStartY = drawStoreLine(y);
+		drawTableHeader(tableStartY);
+		return tableStartY + tableHeaderHeight;
 	}
 
 	function drawRow(y, row) {
 		let x = tableLeft;
-		for (const col of columns) {
-			drawCell(doc, x, y, col.width, rowHeight, row[col.key], { align: col.align, fontSize: 6.5 });
-			x += col.width;
-		}
+		drawCell(doc, x, y, columns.index, rowHeight, row.index, { align: 'center', fontSize: 5.5 });
+		x += columns.index;
+		drawCell(doc, x, y, columns.code, rowHeight, row.code, { align: 'center', fontSize: 5.5 });
+		x += columns.code;
+		drawCell(doc, x, y, columns.name, rowHeight, row.name, { align: 'left', fontSize: 5.5 });
+		x += columns.name;
+		drawCell(doc, x, y, columns.unit, rowHeight, row.unit, { align: 'center', fontSize: 5.5 });
+		x += columns.unit;
+		drawCell(doc, x, y, columns.price, rowHeight, row.price, { align: 'right', fontSize: 5.5 });
+		x += columns.price;
+		drawCell(doc, x, y, columns.docPack, rowHeight, row.docUnits, { align: 'right', fontSize: 5.5 });
+		x += columns.docPack;
+		drawCell(doc, x, y, columns.factTotal, rowHeight, row.factTotal, { align: 'right', fontSize: 5.5 });
+		x += columns.factTotal;
+		drawCell(doc, x, y, columns.discrepancy, rowHeight, row.discrepancy, { align: 'center', fontSize: 5.5 });
 	}
 
-	let y = tableTopStart;
-	drawHeader(y);
-	y += headerHeight;
+	let y = drawPageHeader(doc.y + 2);
 
 	for (const row of tableData.rows) {
-		if (y + rowHeight > doc.page.height - doc.page.margins.bottom - 80) {
+		if (y + rowHeight > doc.page.height - doc.page.margins.bottom - 16) {
 			doc.addPage();
 			configurePdfFont(doc);
-			y = doc.page.margins.top;
-			drawHeader(y);
-			y += headerHeight;
+			y = drawPageHeader(doc.page.margins.top);
 		}
 
 		drawRow(y, row);
 		y += rowHeight;
 	}
 
-	doc.y = y + 14;
-	const footerLineLeft = doc.page.margins.left + 120;
-	const footerLineRight = doc.page.width - doc.page.margins.right;
-	const footerFirstLineY = doc.y;
+	const statementHeight = 28;
+	if (y + statementHeight > doc.page.height - doc.page.margins.bottom) {
+		doc.addPage();
+		configurePdfFont(doc);
+		y = drawPageHeader(doc.page.margins.top);
+	}
+
+	doc.fontSize(6).text('Все остатки товарно-материальных ценностей поименованные в данной учетной ведомости с позиции № ______ по № ______,', tableLeft + 30, y + 4, {
+		width: tableWidth - 30,
+		align: 'left'
+	});
+	doc.text('проверены комиссией в натуре и внесены в учетную ведомость в графу "фактически".', tableLeft + 30, y + 14, {
+		width: tableWidth - 30,
+		align: 'left'
+	});
+	doc.text('Подписи (Ф. И. О. разборчиво)', tableLeft + 30, y + 24, {
+		width: tableWidth - 30,
+		align: 'left'
+	});
+
+	doc.addPage();
+	configurePdfFont(doc);
+	y = drawPageHeader(doc.page.margins.top);
+
+	doc.fontSize(7).text('Члены комиссии:', tableLeft + 30, y + 12, {
+		width: tableWidth - 30,
+		align: 'left'
+	});
+
+	const leftLineStartX = tableLeft + 30;
+	const leftLineEndX = tableLeft + Math.round(tableWidth * 0.43);
+	const rightLineStartX = leftLineEndX + 26;
+	const rightLineEndX = tableLeft + tableWidth;
+	const rightLineWidth = rightLineEndX - rightLineStartX;
+	const rightHalfWidth = rightLineWidth / 2;
+	const firstLineY = y + 40;
 
 	doc.save();
 	doc.lineWidth(0.6);
-	doc.moveTo(footerLineLeft, footerFirstLineY).lineTo(footerLineRight, footerFirstLineY).stroke();
-	doc.moveTo(footerLineLeft, footerFirstLineY + 18).lineTo(footerLineRight, footerFirstLineY + 18).stroke();
-	doc.moveTo(footerLineLeft, footerFirstLineY + 36).lineTo(footerLineRight, footerFirstLineY + 36).stroke();
+	for (let lineIndex = 0; lineIndex < 4; lineIndex += 1) {
+		const lineY = firstLineY + lineIndex * 26;
+		doc.moveTo(leftLineStartX, lineY).lineTo(leftLineEndX, lineY).stroke();
+		doc.moveTo(rightLineStartX, lineY).lineTo(rightLineEndX, lineY).stroke();
+		doc.fontSize(5.5);
+		doc.text('Должность', leftLineStartX, lineY + 2, {
+			width: leftLineEndX - leftLineStartX,
+			align: 'center'
+		});
+		doc.text('Подпись', rightLineStartX, lineY + 2, {
+			width: rightHalfWidth,
+			align: 'center'
+		});
+		doc.text('Расшифровка подписи', rightLineStartX + rightHalfWidth, lineY + 2, {
+			width: rightHalfWidth,
+			align: 'center'
+		});
+	}
 	doc.restore();
-
-	doc.y = footerFirstLineY + 42;
 
 	doc.end();
 	return done;
