@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import QRCode from 'qrcode';
 import bwipjs from 'bwip-js';
+import { markCompletionSurveyPending, track } from './analytics';
 import {
   activateUserSubscription,
   completeRecount,
@@ -619,8 +620,10 @@ export default function App() {
       const action = authMode === 'register' ? register : login;
       const result = await action(authLogin, authPassword);
       await bootstrapAuth(result);
+      track('auth_succeeded', { mode: authMode });
       setAuthPassword('');
     } catch (err) {
+      track('auth_failed', { mode: authMode });
       setAuthError(err instanceof Error ? err.message : 'Ошибка авторизации');
     } finally {
       setAuthLoading(false);
@@ -667,6 +670,7 @@ export default function App() {
     try {
       const data = await getRecount(id);
       const recount = data.recount;
+      track('recount_opened', { source: 'active' });
       setActiveRecount(recount);
       setValues(recount.values || {});
       setSearch(recount.search || '');
@@ -690,6 +694,7 @@ export default function App() {
     try {
       const data = await reopenRecount(id);
       const recount = data.recount;
+      track('recount_reopened', { source: 'history' });
       setActiveRecount(recount);
       setValues(recount.values || {});
       setSearch(recount.search || '');
@@ -720,6 +725,7 @@ export default function App() {
     try {
       const parsed = await createRecountFromPdf(selected);
       const recount = parsed.recount;
+      track('recount_created_from_pdf');
       setActiveRecount(recount);
       setValues(recount.values || {});
       setSearch(recount.search || '');
@@ -819,21 +825,26 @@ export default function App() {
         setUnresolvedBarcode('');
         setCandidateCodes([]);
         triggerScanSuccessFlash();
+        track('barcode_scanned', { area: 'recount', resolved: true });
+        track('barcode_lookup_succeeded', { source: resolved.source || 'unknown' });
       } else if (resolved?.resolved && codes.length > 1) {
         setScannerStatus('Найдено несколько товаров для этого штрихкода');
         setUnresolvedBarcode(code);
         setCandidateCodes(codes);
+        track('barcode_lookup_ambiguous', { candidates_count: codes.length });
       } else {
         setSearch(code);
         setScannerStatus('Артикул не найден, поиск по штрихкоду');
         setUnresolvedBarcode(code);
         setCandidateCodes([]);
+        track('barcode_lookup_failed', { reason: 'not_found' });
       }
     } catch {
       setSearch(code);
       setScannerStatus('Ошибка резолва, поиск по штрихкоду');
       setUnresolvedBarcode(code);
       setCandidateCodes([]);
+      track('barcode_lookup_failed', { reason: 'request_error' });
     }
 
     triggerHaptic(70, 'scan');
@@ -844,12 +855,14 @@ export default function App() {
     if (String(code).trim().startsWith('CEN;')) {
       if (!qrResult) {
         setScannerStatus('Неверный формат CEN');
+        track('tsd_qr_rejected', { reason: 'invalid_format' });
         return;
       }
       setTsdResult({ ...qrResult, generated: false });
       setScannerStatus('QR-код считан');
       triggerScanSuccessFlash();
       triggerHaptic(70, 'scan');
+      track('tsd_qr_scanned', { generated: false });
       return;
     }
 
@@ -864,6 +877,7 @@ export default function App() {
     const price = normalizeTsdPrice(tsdPriceInput);
     if (!price || !tsdResult?.barcode) {
       setError('Введите цену в формате 00.00 или 00,00');
+      track('tsd_price_rejected', { reason: 'invalid_format' });
       return;
     }
 
@@ -879,6 +893,7 @@ export default function App() {
     setError('');
     setScannerStatus('QR-код сформирован');
     triggerScanSuccessFlash();
+    track('tsd_qr_generated', { source: 'barcode' });
   }
 
   function openTsd() {
@@ -888,6 +903,7 @@ export default function App() {
     setTsdResult(null);
     setTsdPriceModalOpen(false);
     setScannerStatus('Сканер выключен');
+    track('tsd_opened');
   }
 
   function closeTsd() {
@@ -931,6 +947,7 @@ export default function App() {
     closeBindModal();
     triggerScanSuccessFlash();
     triggerHaptic(70, 'scan');
+    track('barcode_bound_manually');
   }
 
   async function scanBarcodeFrame() {
@@ -970,6 +987,7 @@ export default function App() {
       scannerStreamRef.current = stream;
       video.srcObject = stream;
       await video.play();
+      track('scanner_started', { area: tsdOpen ? 'tsd' : 'recount' });
 
       if (supportsBarcodeDetector()) {
         detectorRef.current = new window.BarcodeDetector({ formats: ['code_128', 'ean_13', 'ean_8', 'qr_code'] });
@@ -1102,6 +1120,8 @@ export default function App() {
         includeTotalSummary,
         updateCompletionTime
       });
+      markCompletionSurveyPending();
+      track('recount_completed', { has_pdf: true });
 
       const fileName = result.fileName.toLowerCase().endsWith('.pdf')
         ? result.fileName
@@ -1161,6 +1181,7 @@ export default function App() {
         ...progressPayload,
         updateCompletionTime
       });
+      track('recount_completed', { has_pdf: false });
 
       setCompleteModalOpen(false);
       setCounterName('');
