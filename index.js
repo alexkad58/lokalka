@@ -1,6 +1,7 @@
 import { createWriteStream, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import PDFDocument from 'pdfkit';
+import { sanitizeFactExpression as sanitizeFactExpressionUtil, sumFactExpression as sumFactExpressionUtil } from './shared/recount-utils.js';
 
 function toIsoNow() {
 	return new Date().toISOString();
@@ -12,18 +13,11 @@ function asNumber(value) {
 }
 
 function sanitizeFactExpression(value) {
-	let normalized = String(value || '').replace(/[^\d+]/g, '');
-	normalized = normalized.replace(/\++/g, '+');
-	normalized = normalized.replace(/^\+/, '');
-	return normalized;
+	return sanitizeFactExpressionUtil(value);
 }
 
 function sumFactExpression(value) {
-	const normalized = sanitizeFactExpression(value);
-	const parts = normalized.split('+').filter(Boolean);
-	if (!parts.length) return null;
-
-	return parts.reduce((acc, part) => acc + asNumber(part), 0);
+	return sumFactExpressionUtil(value);
 }
 
 function computeItemFact(item, values, options = {}) {
@@ -110,7 +104,7 @@ function buildTableRows(recount) {
 			price: asNumber(item.price).toFixed(2),
 			docPack: '',
 			docUnits: docQty || '',
-			factTotal: factNumber === null ? '' : factNumber,
+			factTotal: factNumber === null ? '' : (rawExpression || String(factNumber)),
 			discrepancy: delta === null || delta === 0 ? '' : `${delta > 0 ? '+' : ''}${delta}`
 		});
 

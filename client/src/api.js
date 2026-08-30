@@ -109,6 +109,23 @@ export async function resetUserDeviceBinding(userId) {
   return readJsonOrThrow(response, 'Не удалось сбросить привязку устройства');
 }
 
+export async function setUserDeviceBindingDisabled(userId, disabled) {
+  const response = await fetch(`/api/admin/users/${encodeURIComponent(userId)}/device-binding`, {
+    method: 'POST',
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ disabled })
+  });
+  return readJsonOrThrow(response, 'Не удалось изменить ограничение привязки');
+}
+
+export async function deleteRecount(id) {
+  const response = await fetch(`/api/recounts/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+    headers: authHeaders()
+  });
+  return readJsonOrThrow(response, 'Не удалось удалить просчет');
+}
+
 export async function deleteAdminUser(userId) {
   const response = await fetch(`/api/admin/users/${encodeURIComponent(userId)}`, {
     method: 'DELETE',

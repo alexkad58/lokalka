@@ -2,6 +2,7 @@ import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import multipart from '@fastify/multipart';
 import { PDFParse } from 'pdf-parse';
+import { sanitizeFactExpression as sanitizeFactExpressionUtil, sumFactExpression as sumFactExpressionUtil } from '../shared/recount-utils.js';
 import http from 'node:http';
 import https from 'node:https';
 import { spawn } from 'node:child_process';
@@ -286,6 +287,7 @@ function publicUser(user) {
     subscriptionUntil: user.subscriptionUntil || null,
     subscriptionActive: hasActiveSubscription(user),
     deviceBound: Boolean(user.deviceId),
+    deviceBindingDisabled: Boolean(user.deviceBindingDisabled),
     defaultCounterName: user.defaultCounterName || ''
   };
 }
@@ -506,7 +508,9 @@ async function authenticate(request, reply) {
     return;
   }
 
-  if (user.deviceId && user.deviceId !== requestDeviceId) {
+  const deviceBindingDisabled = Boolean(user.deviceBindingDisabled);
+
+  if (!deviceBindingDisabled && user.deviceId && user.deviceId !== requestDeviceId) {
     logEvent('warn', 'device-mismatch-auth', {
       method: request.method,
       path: request.url,
@@ -520,7 +524,7 @@ async function authenticate(request, reply) {
     return;
   }
 
-  if (session?.deviceId && session.deviceId !== requestDeviceId) {
+  if (!deviceBindingDisabled && session?.deviceId && session.deviceId !== requestDeviceId) {
     logEvent('warn', 'session-device-mismatch', {
       method: request.method,
       path: request.url,
@@ -534,9 +538,9 @@ async function authenticate(request, reply) {
     return;
   }
 
-  if (!user.deviceId) {
+  if (!user.deviceId || deviceBindingDisabled) {
     user.deviceId = requestDeviceId;
-    if (session && !session.deviceId) {
+    if (session && (!session.deviceId || deviceBindingDisabled)) {
       session.deviceId = requestDeviceId;
       session.updatedAt = toIsoNow();
       const sessionIndex = (Array.isArray(db.sessions) ? db.sessions : [])
@@ -555,6 +559,7 @@ async function authenticate(request, reply) {
       actorId: user.id,
       actorLogin: user.login,
       deviceId: requestDeviceId,
+      deviceBindingDisabled,
       ip: getRequestIp(request)
     });
   }
@@ -597,18 +602,11 @@ function computeItemFact(item, values, options = {}) {
 }
 
 function sanitizeFactExpression(value) {
-  let normalized = String(value || '').replace(/[^\d+]/g, '');
-  normalized = normalized.replace(/\++/g, '+');
-  normalized = normalized.replace(/^\+/, '');
-  return normalized;
+  return sanitizeFactExpressionUtil(value);
 }
 
 function sumFactExpression(value) {
-  const normalized = sanitizeFactExpression(value);
-  const parts = normalized.split('+').filter(Boolean);
-  if (!parts.length) return null;
-
-  return parts.reduce((acc, part) => acc + asNumber(part), 0);
+  return sumFactExpressionUtil(value);
 }
 
 function buildRecountSummary(recount) {
@@ -749,7 +747,7 @@ function buildTableRows(recount, options) {
       price: asNumber(item.price).toFixed(2),
       docPack: '',
       docUnits: docQty || '',
-      factTotal: factNumber === null ? '' : factNumber,
+      factTotal: factNumber === null ? '' : (rawExpression || String(factNumber)),
       discrepancy: delta === null || delta === 0 ? '' : `${delta > 0 ? '+' : ''}${delta}`
     });
 
@@ -778,6 +776,7 @@ async function buildPdfBufferFromRecount(recount, options) {
 
   const completedAt = recount.completedAt || toIsoNow();
   const tableData = buildTableRows(recount, options);
+  const includeDiscrepancyTable = Boolean(options.includeDiscrepancyTable);
 
   doc.fontSize(10).text('Акт контрольно-ревизионной проверки по количеству и качеству', { align: 'center' });
   doc.fontSize(8).text(`от ${formatRuDate(new Date())} г.`, { align: 'center' });
@@ -929,7 +928,9 @@ async function buildPdfBufferFromRecount(recount, options) {
   }
 
   const statementHeight = 28;
-  if (y + statementHeight > doc.page.height - doc.page.margins.bottom) {
+  const signatureBlockHeight = 110;
+  const requiresNewPageForSignatures = y + statementHeight + signatureBlockHeight > doc.page.height - doc.page.margins.bottom;
+  if (requiresNewPageForSignatures) {
     doc.addPage();
     configurePdfFont(doc);
     y = drawPageHeader(doc.page.margins.top);
@@ -948,11 +949,8 @@ async function buildPdfBufferFromRecount(recount, options) {
     align: 'left'
   });
 
-  doc.addPage();
-  configurePdfFont(doc);
-  y = drawPageHeader(doc.page.margins.top);
-
-  doc.fontSize(7).text('Члены комиссии:', tableLeft + 30, y + 12, {
+  const signatureY = y + 38;
+  doc.fontSize(7).text('Члены комиссии:', tableLeft + 30, signatureY + 2, {
     width: tableWidth - 30,
     align: 'left'
   });
@@ -963,7 +961,7 @@ async function buildPdfBufferFromRecount(recount, options) {
   const rightLineEndX = tableLeft + tableWidth;
   const rightLineWidth = rightLineEndX - rightLineStartX;
   const rightHalfWidth = rightLineWidth / 2;
-  const firstLineY = y + 40;
+  const firstLineY = signatureY + 28;
 
   doc.save();
   doc.lineWidth(0.6);
@@ -986,6 +984,53 @@ async function buildPdfBufferFromRecount(recount, options) {
     });
   }
   doc.restore();
+
+  if (includeDiscrepancyTable && tableData.mismatchRows.length) {
+    doc.addPage();
+    configurePdfFont(doc);
+    y = drawPageHeader(doc.page.margins.top);
+    doc.fontSize(10).text('Таблица расхождений', tableLeft, y + 6, {
+      width: tableWidth,
+      align: 'center'
+    });
+    y += 18;
+
+    const diffColumns = {
+      index: 22,
+      name: tableWidth - 22 - 52 - 60 - 38,
+      code: 52,
+      discrepancy: 38
+    };
+
+    let diffX = tableLeft;
+    drawCell(doc, diffX, y, diffColumns.index, 12, '№', { align: 'center', fontSize: 6.3 });
+    diffX += diffColumns.index;
+    drawCell(doc, diffX, y, diffColumns.name, 12, 'Название', { align: 'center', fontSize: 6.3 });
+    diffX += diffColumns.name;
+    drawCell(doc, diffX, y, diffColumns.code, 12, 'Артикул', { align: 'center', fontSize: 6.3 });
+    diffX += diffColumns.code;
+    drawCell(doc, diffX, y, diffColumns.discrepancy, 12, 'Расхождение', { align: 'center', fontSize: 6.3 });
+    y += 12;
+
+    for (const row of tableData.mismatchRows) {
+      const rowHeight = 12;
+      if (y + rowHeight > doc.page.height - doc.page.margins.bottom - 20) {
+        doc.addPage();
+        configurePdfFont(doc);
+        y = drawPageHeader(doc.page.margins.top);
+      }
+
+      let diffRowX = tableLeft;
+      drawCell(doc, diffRowX, y, diffColumns.index, rowHeight, row.index, { align: 'center', fontSize: 6.1 });
+      diffRowX += diffColumns.index;
+      drawCell(doc, diffRowX, y, diffColumns.name, rowHeight, row.name, { align: 'left', fontSize: 6.1 });
+      diffRowX += diffColumns.name;
+      drawCell(doc, diffRowX, y, diffColumns.code, rowHeight, row.code, { align: 'center', fontSize: 6.1 });
+      diffRowX += diffColumns.code;
+      drawCell(doc, diffRowX, y, diffColumns.discrepancy, rowHeight, row.discrepancy, { align: 'center', fontSize: 6.1 });
+      y += rowHeight;
+    }
+  }
 
   doc.end();
   return done;
@@ -1656,7 +1701,7 @@ async function readPdfBuffer(file) {
 
 app.register(cors, {
   origin: true,
-  methods: ['GET', 'POST', 'OPTIONS']
+  methods: ['GET', 'POST', 'DELETE', 'OPTIONS']
 });
 
 app.register(multipart, {
@@ -1708,7 +1753,8 @@ app.post('/api/auth/register', async (request, reply) => {
     createdAt: toIsoNow(),
     isAdmin: false,
     subscriptionUntil: null,
-    deviceId
+    deviceId,
+    deviceBindingDisabled: false
   };
 
   db.users.push(user);
@@ -1764,7 +1810,7 @@ app.post('/api/auth/login', async (request, reply) => {
     };
   }
 
-  if (user.deviceId && user.deviceId !== deviceId) {
+  if (!user.deviceBindingDisabled && user.deviceId && user.deviceId !== deviceId) {
     logEvent('warn', 'login-device-mismatch', {
       actorId: user.id,
       actorLogin: user.login,
@@ -1779,13 +1825,14 @@ app.post('/api/auth/login', async (request, reply) => {
     });
   }
 
-  if (!user.deviceId) {
+  if (!user.deviceId || user.deviceBindingDisabled) {
     user.deviceId = deviceId;
     await saveDb();
     logEvent('info', 'device-bound-on-login', {
       actorId: user.id,
       actorLogin: user.login,
       deviceId,
+      deviceBindingDisabled: Boolean(user.deviceBindingDisabled),
       ip: getRequestIp(request)
     });
   }
@@ -1845,6 +1892,7 @@ app.get('/api/admin/users', { preHandler: [authenticate, requireAdmin] }, async 
         subscriptionUntil: user.subscriptionUntil || null,
         subscriptionActive: hasActiveSubscription(user),
         deviceBound: Boolean(user.deviceId),
+        deviceBindingDisabled: Boolean(user.deviceBindingDisabled),
         subscriptionStatusKey: status.key,
         subscriptionStatusLabel: status.label
       };
@@ -1990,6 +2038,52 @@ app.post('/api/admin/users/:id/device/reset', { preHandler: [authenticate, requi
     ok: true,
     user: publicUser(target)
   };
+});
+
+app.post('/api/admin/users/:id/device-binding', { preHandler: [authenticate, requireAdmin] }, async (request, reply) => {
+  const { id } = request.params;
+  const body = request.body && typeof request.body === 'object' ? request.body : {};
+  const target = db.users.find(user => user.id === id);
+
+  if (!target) {
+    return reply.code(404).send({ ok: false, error: 'Пользователь не найден' });
+  }
+
+  const disabled = Boolean(body.disabled);
+  target.deviceBindingDisabled = disabled;
+  await saveDb();
+
+  logEvent('warn', disabled ? 'admin-device-binding-disabled' : 'admin-device-binding-enabled', buildRequestLogMeta(request, {
+    targetUserId: target.id,
+    targetLogin: target.login,
+    deviceBindingDisabled: disabled
+  }));
+
+  return {
+    ok: true,
+    user: publicUser(target)
+  };
+});
+
+app.delete('/api/recounts/:id', { preHandler: [authenticate, requireServiceAccess] }, async (request, reply) => {
+  const { id } = request.params;
+  const recount = db.recounts.find(item => item.id === id && item.userId === request.user.id);
+
+  if (!recount) {
+    logEvent('warn', 'recount-delete-not-found', buildRequestLogMeta(request, { recountId: id }));
+    return reply.code(404).send({ ok: false, error: 'Просчет не найден' });
+  }
+
+  db.recounts = db.recounts.filter(item => !(item.id === recount.id && item.userId === request.user.id));
+  await saveDb();
+
+  logEvent('warn', 'recount-delete-success', buildRequestLogMeta(request, {
+    recountId: recount.id,
+    docId: recount.docId,
+    userId: request.user.id
+  }));
+
+  return { ok: true };
 });
 
 app.delete('/api/admin/users/:id', { preHandler: [authenticate, requireAdmin] }, async (request, reply) => {
@@ -2235,6 +2329,7 @@ app.post('/api/recounts/:id/complete', { preHandler: [authenticate, requireServi
   const counterName = String(body.counterName || '').trim();
   const groupName = String(body.groupName || '').trim();
   const includeTotalSummary = Boolean(body.includeTotalSummary);
+  const includeDiscrepancyTable = Boolean(body.includeDiscrepancyTable);
 
   if (!withoutPdf && (!counterName || !groupName)) {
     logEvent('warn', 'recount-complete-missing-fields', buildRequestLogMeta(request, {
@@ -2306,13 +2401,15 @@ app.post('/api/recounts/:id/complete', { preHandler: [authenticate, requireServi
     counterName,
     groupName,
     includeTotalSummary,
+    includeDiscrepancyTable,
     updateCompletionTime
   }));
 
   const pdfBuffer = await buildPdfBufferFromRecount(recount, {
     counterName,
     groupName,
-    includeTotalSummary
+    includeTotalSummary,
+    includeDiscrepancyTable
   });
 
   reply.header('Content-Type', 'application/pdf');

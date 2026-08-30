@@ -1,6 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import QRCode from 'qrcode';
 import bwipjs from 'bwip-js';
+import {
+  normalizeScannedCode,
+  sanitizeFactExpression as sanitizeFactExpressionUtil,
+  sumFactExpression as sumFactExpressionUtil
+} from '../../shared/recount-utils.js';
 import { markCompletionSurveyPending, track } from './analytics';
 import {
   activateUserSubscription,
@@ -100,18 +105,11 @@ function safeNumber(value) {
 }
 
 function sanitizeFactExpression(value) {
-  let normalized = String(value || '').replace(/[^\d+]/g, '');
-  normalized = normalized.replace(/\++/g, '+');
-  normalized = normalized.replace(/^\+/, '');
-  return normalized;
+  return sanitizeFactExpressionUtil(value);
 }
 
 function sumFactExpression(value) {
-  const normalized = sanitizeFactExpression(value);
-  const parts = normalized.split('+').filter(Boolean);
-  if (!parts.length) return null;
-
-  return parts.reduce((acc, part) => acc + safeNumber(part), 0);
+  return sumFactExpressionUtil(value);
 }
 
 function supportsBarcodeDetector() {
@@ -288,6 +286,7 @@ export default function App() {
   const [counterName, setCounterName] = useState('');
   const [groupName, setGroupName] = useState('');
   const [includeTotalSummary, setIncludeTotalSummary] = useState(true);
+  const [includeDiscrepancyTable, setIncludeDiscrepancyTable] = useState(false);
   const [updateCompletionTime, setUpdateCompletionTime] = useState(true);
   const [activeFactCode, setActiveFactCode] = useState('');
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -471,6 +470,35 @@ export default function App() {
     };
   }, [activeRecount, token, values, search, barcodeCache]);
 
+  const progressSummary = useMemo(() => {
+    const items = activeRecount?.items || [];
+    let totalDocQty = 0;
+    let totalFactQty = 0;
+    let totalSum = 0;
+
+    for (const item of items) {
+      const docQty = safeNumber(item.docQty);
+      const raw = sanitizeFactExpression(valueMapForProgress(items, values)[item.code] ?? '');
+      const factQty = raw ? sumFactExpression(raw) : null;
+      totalDocQty += docQty;
+      if (factQty !== null) {
+        totalFactQty += factQty;
+        const delta = factQty - docQty;
+        const price = safeNumber(item.price);
+        totalSum += delta * price;
+      }
+    }
+
+    const denominator = Math.max(1, totalDocQty);
+    const progressPercent = totalDocQty ? Math.min(100, (totalFactQty / denominator) * 100) : 0;
+    return {
+      totalDocQty,
+      totalFactQty,
+      totalSum,
+      progressPercent: Number(progressPercent.toFixed(1))
+    };
+  }, [activeRecount, values]);
+
   const filteredItems = useMemo(() => {
     const query = normalizeQuery(search);
     const items = activeRecount?.items || [];
@@ -514,6 +542,15 @@ export default function App() {
       })
       .filter(item => item.delta !== 0);
   }, [activeRecount, values]);
+
+  function valueMapForProgress(items, valueMap) {
+    const source = items && Array.isArray(items) ? items : [];
+    const result = {};
+    for (const item of source) {
+      result[item.code] = valueMap?.[item.code] ?? '';
+    }
+    return result;
+  }
 
   function computeRowState(item, valueMap) {
     const raw = sanitizeFactExpression(valueMap[item.code] ?? '');
@@ -801,13 +838,14 @@ export default function App() {
   }
 
   async function applyScannedCode(code) {
+    const normalizedCode = normalizeScannedCode(code);
     const now = Date.now();
-    if (!code) return;
-    if (code === lastCodeRef.current && now - lastCodeTsRef.current < 1500) return;
+    if (!normalizedCode) return;
+    if (normalizedCode === lastCodeRef.current && now - lastCodeTsRef.current < 1500) return;
 
-    lastCodeRef.current = code;
+    lastCodeRef.current = normalizedCode;
     lastCodeTsRef.current = now;
-    setLastCode(code);
+    setLastCode(normalizedCode);
 
     if (tsdOpen) {
       handleTsdScan(code);
@@ -816,7 +854,7 @@ export default function App() {
 
     try {
       setScannerStatus('Поиск артикула...');
-      const resolved = await resolveBarcodeWithCache(code);
+      const resolved = await resolveBarcodeWithCache(normalizedCode);
       const codes = resolved?.codes || [];
 
       if (resolved?.resolved && codes.length === 1) {
@@ -829,20 +867,20 @@ export default function App() {
         track('barcode_lookup_succeeded', { source: resolved.source || 'unknown' });
       } else if (resolved?.resolved && codes.length > 1) {
         setScannerStatus('Найдено несколько товаров для этого штрихкода');
-        setUnresolvedBarcode(code);
+        setUnresolvedBarcode(normalizedCode);
         setCandidateCodes(codes);
         track('barcode_lookup_ambiguous', { candidates_count: codes.length });
       } else {
-        setSearch(code);
+        setSearch(normalizedCode);
         setScannerStatus('Артикул не найден, поиск по штрихкоду');
-        setUnresolvedBarcode(code);
+        setUnresolvedBarcode(normalizedCode);
         setCandidateCodes([]);
         track('barcode_lookup_failed', { reason: 'not_found' });
       }
     } catch {
-      setSearch(code);
+      setSearch(normalizedCode);
       setScannerStatus('Ошибка резолва, поиск по штрихкоду');
-      setUnresolvedBarcode(code);
+      setUnresolvedBarcode(normalizedCode);
       setCandidateCodes([]);
       track('barcode_lookup_failed', { reason: 'request_error' });
     }
@@ -851,7 +889,8 @@ export default function App() {
   }
 
   function handleTsdScan(code) {
-    const qrResult = parseTsdQr(code);
+    const normalizedCode = normalizeScannedCode(code);
+    const qrResult = parseTsdQr(normalizedCode);
     if (String(code).trim().startsWith('CEN;')) {
       if (!qrResult) {
         setScannerStatus('Неверный формат CEN');
@@ -974,6 +1013,12 @@ export default function App() {
     if (!activeRecount?.items?.length && !tsdOpen) {
       setScannerStatus('Сначала загрузите PDF');
       return;
+    }
+
+    if (video) {
+      video.setAttribute('playsinline', 'true');
+      video.setAttribute('autoplay', 'true');
+      video.setAttribute('muted', 'true');
     }
 
     try {
@@ -1118,6 +1163,7 @@ export default function App() {
         counterName,
         groupName,
         includeTotalSummary,
+        includeDiscrepancyTable,
         updateCompletionTime
       });
       markCompletionSurveyPending();
@@ -1165,6 +1211,7 @@ export default function App() {
 
   function openCompleteModal() {
     setCounterName(prev => prev || user?.defaultCounterName || '');
+    setIncludeDiscrepancyTable(false);
     setUpdateCompletionTime(true);
     setCompleteModalOpen(true);
   }
@@ -1179,6 +1226,7 @@ export default function App() {
       const progressPayload = buildProgressPayload(values, search, barcodeCache);
       await finishRecountWithoutPdf(activeRecount.id, {
         ...progressPayload,
+        includeDiscrepancyTable,
         updateCompletionTime
       });
       track('recount_completed', { has_pdf: false });
@@ -1705,7 +1753,9 @@ export default function App() {
           </div>
           <div className="scanner-meta">
             <span>{loading ? 'Подождите...' : scannerStatus}</span>
-            <span className="scanner-last">{lastCode || `Документ: ${activeRecount.docId}`}</span>
+            <span className="scanner-last">
+              {`${formatRub(progressSummary.totalSum)} | ${progressSummary.progressPercent}%`}
+            </span>
           </div>
           {unresolvedBarcode ? (
             <div className="scanner-unresolved">
@@ -1756,8 +1806,7 @@ export default function App() {
               }}
               className={`item-card ${row.status}`}
             >
-              <div className="line"><strong>Артикул:</strong> {item.code}</div>
-              <div className="line"><strong>Название:</strong> {item.name}</div>
+              <div className="line">{item.name}</div>
               <div className="line mini">
                 <strong>Ед:</strong>{' '}
                 <span
@@ -1767,6 +1816,7 @@ export default function App() {
                 />
                 <span>{item.unit || '—'}</span>
                 {' '}| <strong>Цена:</strong> {item.price ?? '—'}
+                {' '}| <strong>Код:</strong> {item.code}
               </div>
               <div className="line mini"><strong>По документам:</strong> {item.docQty ?? '—'} | <strong>Разница:</strong> {row.delta === null ? '—' : row.delta}</div>
               <input
@@ -1897,6 +1947,14 @@ export default function App() {
                 onChange={event => setIncludeTotalSummary(event.target.checked)}
               />
               Свести -/+
+            </label>
+            <label className="checkbox-row">
+              <input
+                type="checkbox"
+                checked={includeDiscrepancyTable}
+                onChange={event => setIncludeDiscrepancyTable(event.target.checked)}
+              />
+              Таблица расхождений
             </label>
             {activeRecount?.completedAt ? (
               <label className="checkbox-row">
