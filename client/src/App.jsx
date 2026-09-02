@@ -893,7 +893,7 @@ export default function App() {
     const qrResult = parseTsdQr(normalizedCode);
     if (String(code).trim().startsWith('CEN;')) {
       if (!qrResult) {
-        setScannerStatus('Неверный формат CEN');
+        setScannerStatus('Неверный формат: ' + code);
         track('tsd_qr_rejected', { reason: 'invalid_format' });
         return;
       }
