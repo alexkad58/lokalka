@@ -7,6 +7,7 @@ test('sanitizeFactExpression keeps expression format and removes invalid chars',
   assert.equal(sanitizeFactExpression('3+7+12'), '3+7+12');
   assert.equal(sanitizeFactExpression('3 + 7 + 12'), '3+7+12');
   assert.equal(sanitizeFactExpression('abc3+7x'), '3+7');
+  assert.equal(sanitizeFactExpression('3+'), '3+');
 });
 
 test('sumFactExpression totals added values', () => {
