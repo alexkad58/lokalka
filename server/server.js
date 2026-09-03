@@ -24,6 +24,8 @@ const app = Fastify({
   }
 });
 
+PDFParse.setWorker('pdfjs-dist/legacy/build/pdf.worker.min.mjs');
+
 const MAX_FILE_SIZE = 50 * 1024 * 1024;
 const AUTOSAVE_MIN_INTERVAL_MS = 3000;
 const barcodeResolutionCache = new Map();
