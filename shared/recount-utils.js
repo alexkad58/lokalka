@@ -7,7 +7,6 @@ export function sanitizeFactExpression(value) {
   let normalized = String(value ?? '').replace(/[^\d+]/g, '');
   normalized = normalized.replace(/\++/g, '+');
   normalized = normalized.replace(/^\+/, '');
-  normalized = normalized.replace(/\+$/, '');
   return normalized;
 }
 
