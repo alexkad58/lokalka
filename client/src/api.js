@@ -92,6 +92,22 @@ export async function getAdminLogs(level = 'all', limit = 200) {
   return readJsonOrThrow(response, 'Не удалось загрузить логи');
 }
 
+export async function getAdminShopApiSettings() {
+  const response = await fetch('/api/admin/shop-api', {
+    headers: authHeaders()
+  });
+  return readJsonOrThrow(response, 'Не удалось загрузить настройки API магазина');
+}
+
+export async function updateAdminShopApiToken(token) {
+  const response = await fetch('/api/admin/shop-api', {
+    method: 'POST',
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ token })
+  });
+  return readJsonOrThrow(response, 'Не удалось сохранить токен API магазина');
+}
+
 export async function activateUserSubscription(userId, payload = {}) {
   const response = await fetch(`/api/admin/users/${encodeURIComponent(userId)}/subscription`, {
     method: 'POST',
@@ -208,13 +224,13 @@ export async function completeRecount(id, payload) {
   };
 }
 
-export async function resolveBarcode(barcode, itemCodes = []) {
+export async function resolveBarcode(barcode, itemCodes = [], recountId = '') {
   const response = await fetch('/api/recount/resolve-barcode', {
     method: 'POST',
     headers: authHeaders({
       'Content-Type': 'application/json'
     }),
-    body: JSON.stringify({ barcode, itemCodes })
+    body: JSON.stringify({ barcode, itemCodes, recountId })
   });
 
   return readJsonOrThrow(response, 'Не удалось обработать штрихкод');

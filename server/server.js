@@ -38,7 +38,8 @@ const ADMIN_PASSWORD = String(process.env.ADMIN_PASSWORD || 'admin');
 const db = {
   users: [],
   recounts: [],
-  sessions: []
+  sessions: [],
+  settings: {}
 };
 
 const sessions = new Map();
@@ -216,6 +217,10 @@ async function loadDb() {
       }))
       : [];
     db.recounts = Array.isArray(parsed?.recounts) ? parsed.recounts : [];
+    db.settings = parsed?.settings && typeof parsed.settings === 'object' ? parsed.settings : {};
+    if (db.settings.shopApiAccessToken) {
+      tokenState.accessToken = String(db.settings.shopApiAccessToken).trim();
+    }
     db.sessions = Array.isArray(parsed?.sessions)
       ? parsed.sessions.map(item => ({
         token: String(item?.token || '').trim(),
@@ -237,6 +242,7 @@ async function loadDb() {
     db.users = [];
     db.recounts = [];
     db.sessions = [];
+    db.settings = {};
     ensureAdminUser();
     hydrateSessionsFromDb();
     await saveDb();
@@ -264,6 +270,7 @@ async function loadBarcodeResolutionCache() {
           codes: Array.from(new Set(codes)),
           source: record.source || 'cache',
           product: record.product || null,
+          storeNumber: record.storeNumber ? String(record.storeNumber) : '',
           updatedAt: record.updatedAt || Date.now()
         });
       }
@@ -1393,19 +1400,15 @@ function lastTokenChars(value, size = 5) {
   return token.slice(-size);
 }
 
-function buildShopBarcodeUrl(barcode) {
+function buildShopBarcodeUrl(barcode, storeNumber = '') {
   if (!SHOP_API_URL) return '';
 
   const encodedBarcode = encodeURIComponent(barcode);
 
-  // If URL contains placeholder, replace it directly.
-  if (SHOP_API_URL.includes('{barcode}')) {
-    return SHOP_API_URL.replace('{barcode}', encodedBarcode);
-  }
+  let url = SHOP_API_URL.replace('{barcode}', encodedBarcode);
 
   // Support endpoint format: /products/barcode/{barcode}/
-  let url = SHOP_API_URL;
-  if (!url.includes('?')) {
+  if (!SHOP_API_URL.includes('{barcode}') && !url.includes('?')) {
     if (!url.endsWith('/')) url += '/';
     url += `${encodedBarcode}/`;
   }
@@ -1414,7 +1417,8 @@ function buildShopBarcodeUrl(barcode) {
   const glue = hasQuery ? '&' : '?';
   const query = [];
   if (SHOP_API_CITY_ID) query.push(`city_id=${encodeURIComponent(SHOP_API_CITY_ID)}`);
-  if (SHOP_API_SHOP_ID) query.push(`shop_id=${encodeURIComponent(SHOP_API_SHOP_ID)}`);
+  const shopId = String(storeNumber || SHOP_API_SHOP_ID || '').trim();
+  if (shopId) query.push(`shop_id=${encodeURIComponent(shopId)}`);
 
   if (query.length > 0) {
     url += `${glue}${query.join('&')}`;
@@ -1469,11 +1473,11 @@ function getResponseBodyForLog(response, payload) {
   return rawBody || null;
 }
 
-async function resolveBarcodeFromShopApi(barcode) {
+async function resolveBarcodeFromShopApi(barcode, storeNumber = '') {
   if (!SHOP_API_URL) return { resolved: false, source: 'unconfigured' };
 
   const url = SHOP_API_METHOD === 'GET'
-    ? buildShopBarcodeUrl(barcode)
+    ? buildShopBarcodeUrl(barcode, storeNumber)
     : SHOP_API_URL;
 
   async function sendRequest() {
@@ -1509,7 +1513,9 @@ async function resolveBarcodeFromShopApi(barcode) {
     const response = await sendShopApiRequest(url, {
       method: SHOP_API_METHOD,
       headers,
-      body: SHOP_API_METHOD === 'POST' ? JSON.stringify({ barcode }) : undefined
+      body: SHOP_API_METHOD === 'POST'
+        ? JSON.stringify({ barcode, shop_id: String(storeNumber || SHOP_API_SHOP_ID || '').trim() || undefined })
+        : undefined
     });
 
     const responseMeta = {
@@ -1651,7 +1657,7 @@ async function resolveBarcodeFromShopApi(barcode) {
   }
 }
 
-function addBarcodeResolutionCode(barcode, code, source, product) {
+function addBarcodeResolutionCode(barcode, code, source, product, storeNumber = '') {
   const existing = barcodeResolutionCache.get(barcode);
   const codes = new Set(existing?.codes || []);
   codes.add(String(code));
@@ -1660,6 +1666,7 @@ function addBarcodeResolutionCode(barcode, code, source, product) {
     codes: Array.from(codes),
     source: source || existing?.source || 'cache',
     product: product || existing?.product || null,
+    storeNumber: String(storeNumber || existing?.storeNumber || '').trim(),
     updatedAt: Date.now()
   });
   persistBarcodeResolutionCache();
@@ -1903,6 +1910,37 @@ app.get('/api/admin/users', { preHandler: [authenticate, requireAdmin] }, async 
   return {
     ok: true,
     users
+  };
+});
+
+app.get('/api/admin/shop-api', { preHandler: [authenticate, requireAdmin] }, async () => ({
+  ok: true,
+  configured: Boolean(tokenState.accessToken),
+  tokenLast5: lastTokenChars(tokenState.accessToken),
+  tokenUpdatedAt: tokenState.updatedAt
+}));
+
+app.post('/api/admin/shop-api', { preHandler: [authenticate, requireAdmin] }, async (request, reply) => {
+  const body = request.body && typeof request.body === 'object' ? request.body : {};
+  const token = String(body.token || '').trim();
+  if (!token) {
+    return reply.code(400).send({ ok: false, error: 'Укажите токен API магазина' });
+  }
+
+  tokenState.accessToken = token;
+  tokenState.updatedAt = Date.now();
+  db.settings.shopApiAccessToken = token;
+  await saveDb();
+
+  logEvent('warn', 'admin-shop-api-token-updated', buildRequestLogMeta(request, {
+    tokenLast5: lastTokenChars(token)
+  }));
+
+  return {
+    ok: true,
+    configured: true,
+    tokenLast5: lastTokenChars(token),
+    tokenUpdatedAt: tokenState.updatedAt
   };
 });
 
@@ -2356,6 +2394,22 @@ app.post('/api/recounts/:id/complete', { preHandler: [authenticate, requireServi
     return reply.code(409).send({ ok: false, error: 'Просчет уже завершен' });
   }
 
+  if (body.values && typeof body.values === 'object') {
+    const normalizedValues = {};
+    for (const [key, value] of Object.entries(body.values)) {
+      normalizedValues[String(key)] = sanitizeFactExpression(value);
+    }
+    recount.values = normalizedValues;
+  }
+
+  if (typeof body.search === 'string') {
+    recount.search = body.search;
+  }
+
+  if (body.barcodeCache && typeof body.barcodeCache === 'object') {
+    recount.barcodeCache = body.barcodeCache;
+  }
+
   if (withoutPdf) {
     recount.status = 'completed';
     recount.completedAt = updateCompletionTime ? toIsoNow() : (recount.completedAt || toIsoNow());
@@ -2372,22 +2426,6 @@ app.post('/api/recounts/:id/complete', { preHandler: [authenticate, requireServi
       ok: true,
       recount: sanitizeActiveRecount(recount)
     };
-  }
-
-  if (body.values && typeof body.values === 'object') {
-    const normalizedValues = {};
-    for (const [key, value] of Object.entries(body.values)) {
-      normalizedValues[String(key)] = sanitizeFactExpression(value);
-    }
-    recount.values = normalizedValues;
-  }
-
-  if (typeof body.search === 'string') {
-    recount.search = body.search;
-  }
-
-  if (body.barcodeCache && typeof body.barcodeCache === 'object') {
-    recount.barcodeCache = body.barcodeCache;
   }
 
   recount.counterName = counterName;
@@ -2423,10 +2461,15 @@ app.post('/api/recount/resolve-barcode', { preHandler: [authenticate, requireSer
   const body = request.body && typeof request.body === 'object' ? request.body : {};
   const barcode = normalizeBarcode(body.barcode);
   const itemCodes = Array.isArray(body.itemCodes) ? body.itemCodes.map(code => String(code)) : [];
+  const recount = body.recountId
+    ? db.recounts.find(item => item.id === String(body.recountId) && item.userId === request.user.id)
+    : null;
+  const storeNumber = String(recount?.storeNumber || SHOP_API_SHOP_ID || '').trim();
 
   const requestMeta = {
     barcode,
     itemCodesCount: itemCodes.length,
+    storeNumber: storeNumber || null,
     hasShopApiUrl: Boolean(SHOP_API_URL),
     hasAccessToken: Boolean(tokenState.accessToken)
   };
@@ -2439,7 +2482,10 @@ app.post('/api/recount/resolve-barcode', { preHandler: [authenticate, requireSer
   }
 
   const cached = barcodeResolutionCache.get(barcode);
-  if (cached?.codes?.length) {
+  const cacheMatchesStore = cached?.storeNumber && storeNumber
+    ? cached.storeNumber === storeNumber
+    : !storeNumber || Boolean(cached?.storeNumber);
+  if (cached?.codes?.length && cacheMatchesStore) {
     logEvent('info', 'resolve-barcode-cache-hit', {
       barcode,
       codes: cached.codes,
@@ -2459,11 +2505,11 @@ app.post('/api/recount/resolve-barcode', { preHandler: [authenticate, requireSer
 
   logEvent('info', 'resolve-barcode-cache-miss', { barcode });
 
-  const shopResult = await resolveBarcodeFromShopApi(barcode);
+  const shopResult = await resolveBarcodeFromShopApi(barcode, storeNumber);
   if (shopResult.resolved && shopResult.code) {
     const code = String(shopResult.code);
     const product = shopResult.payload?.product || shopResult.payload?.item || null;
-    addBarcodeResolutionCode(barcode, code, shopResult.source, product);
+    addBarcodeResolutionCode(barcode, code, shopResult.source, product, storeNumber);
 
     logEvent('info', 'resolve-barcode-shop-success', {
       barcode,
@@ -2484,7 +2530,7 @@ app.post('/api/recount/resolve-barcode', { preHandler: [authenticate, requireSer
 
   // Fallback: for cases where barcode and article are identical in a document.
   if (itemCodes.includes(barcode)) {
-    addBarcodeResolutionCode(barcode, barcode, 'item-code-fallback', null);
+    addBarcodeResolutionCode(barcode, barcode, 'item-code-fallback', null, storeNumber);
 
     logEvent('info', 'resolve-barcode-fallback', {
       barcode,

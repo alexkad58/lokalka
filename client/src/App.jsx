@@ -15,6 +15,7 @@ import {
   deleteRecount,
   finishRecountWithoutPdf,
   getAdminLogs,
+  getAdminShopApiSettings,
   getAdminUsers,
   getRecount,
   getRecounts,
@@ -28,7 +29,8 @@ import {
   saveRecountProgress,
   setAuthToken,
   setUserDeviceBindingDisabled,
-  updateAccountSettings
+  updateAccountSettings,
+  updateAdminShopApiToken
 } from './api';
 
 const TOKEN_KEY = 'lokalka_auth_token';
@@ -260,6 +262,9 @@ export default function App() {
   const [adminLogEntries, setAdminLogEntries] = useState([]);
   const [adminLogCounts, setAdminLogCounts] = useState({});
   const [adminLogLoading, setAdminLogLoading] = useState(false);
+  const [shopApiTokenInput, setShopApiTokenInput] = useState('');
+  const [shopApiTokenStatus, setShopApiTokenStatus] = useState(null);
+  const [shopApiTokenSaving, setShopApiTokenSaving] = useState(false);
   const [activationDays, setActivationDays] = useState('30');
   const [activatingUserId, setActivatingUserId] = useState('');
   const [expandedUserId, setExpandedUserId] = useState('');
@@ -273,6 +278,8 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [menuOpen, setMenuOpen] = useState(false);
+  const [hideCompletedItems, setHideCompletedItems] = useState(false);
+  const [mismatchFilter, setMismatchFilter] = useState('all');
   const [scannerOn, setScannerOn] = useState(false);
   const [scannerStatus, setScannerStatus] = useState('Сканер выключен');
   const [lastCode, setLastCode] = useState('');
@@ -505,14 +512,25 @@ export default function App() {
   const filteredItems = useMemo(() => {
     const query = normalizeQuery(search);
     const items = activeRecount?.items || [];
-    if (!query) return items;
-
     return items.filter(item => {
-      const code = normalizeQuery(item.code);
-      const name = normalizeQuery(item.name);
-      return code.includes(query) || name.includes(query);
+      const matchesQuery = !query
+        || normalizeQuery(item.code).includes(query)
+        || normalizeQuery(item.name).includes(query);
+      if (!matchesQuery) return false;
+      if (hideCompletedItems && computeRowState(item, values).delta === 0) return false;
+      return true;
     });
-  }, [activeRecount, search]);
+  }, [activeRecount, search, hideCompletedItems, values]);
+
+  const hiddenCompletedMatch = useMemo(() => {
+    if (!hideCompletedItems || !search.trim()) return false;
+    const query = normalizeQuery(search);
+    return (activeRecount?.items || []).some(item => {
+      const matchesQuery = normalizeQuery(item.code).includes(query)
+        || normalizeQuery(item.name).includes(query);
+      return matchesQuery && computeRowState(item, values).delta === 0;
+    });
+  }, [activeRecount, search, hideCompletedItems, values]);
 
   const bindFilteredItems = useMemo(() => {
     const query = normalizeQuery(bindSearch);
@@ -543,8 +561,9 @@ export default function App() {
           ...row
         };
       })
-      .filter(item => item.delta !== 0);
-  }, [activeRecount, values]);
+        .filter(item => item.delta !== 0)
+        .filter(item => mismatchFilter !== 'missing' || item.fact === null);
+      }, [activeRecount, values, mismatchFilter]);
 
   function valueMapForProgress(items, valueMap) {
     const source = items && Array.isArray(items) ? items : [];
@@ -629,6 +648,15 @@ export default function App() {
     }
   }
 
+  async function refreshAdminShopApiSettings() {
+    try {
+      const data = await getAdminShopApiSettings();
+      setShopApiTokenStatus(data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось загрузить настройки API магазина');
+    }
+  }
+
   async function bootstrapAuth(result) {
     const nextToken = String(result?.token || '').trim();
     if (!nextToken) throw new Error('Сервер не вернул токен');
@@ -640,7 +668,7 @@ export default function App() {
     setUser(nextUser);
 
     if (nextUser?.isAdmin) {
-      await Promise.all([refreshAdminUsers(), refreshAdminLogs('all')]);
+      await Promise.all([refreshAdminUsers(), refreshAdminLogs('all'), refreshAdminShopApiSettings()]);
       return;
     }
 
@@ -814,7 +842,7 @@ export default function App() {
       return pending;
     }
 
-    const requestPromise = resolveBarcode(barcode, getItemCodes())
+    const requestPromise = resolveBarcode(barcode, getItemCodes(), activeRecount?.id)
       .then(apiResult => {
         const codes = Array.isArray(apiResult?.codes) ? apiResult.codes.map(String) : [];
         if (apiResult?.resolved && codes.length) {
@@ -1116,6 +1144,32 @@ export default function App() {
     }
   }
 
+  async function focusScannerCamera() {
+    const stream = scannerStreamRef.current;
+    const track = stream?.getVideoTracks?.()[0];
+    if (!track?.applyConstraints) return;
+
+    try {
+      const capabilities = track.getCapabilities?.();
+      const focusModes = capabilities?.focusMode || [];
+      const focusMode = focusModes.includes('continuous')
+        ? 'continuous'
+        : focusModes.includes('single-shot')
+          ? 'single-shot'
+          : null;
+      if (focusMode) {
+        await track.applyConstraints({ advanced: [{ focusMode }] });
+      }
+    } catch {
+      // Autofocus is optional and not supported by every camera.
+    }
+  }
+
+  function handleScannerDoubleClick(event) {
+    event.preventDefault();
+    void toggleTorch();
+  }
+
   function updateFact(code, nextValue) {
     const normalized = sanitizeFactExpression(nextValue);
     setValues(prev => ({
@@ -1230,6 +1284,7 @@ export default function App() {
   async function handleFinishWithoutPdf() {
     if (!activeRecount) return;
 
+    setMenuOpen(false);
     setLoading(true);
     setError('');
 
@@ -1326,6 +1381,46 @@ export default function App() {
       setError(err instanceof Error ? err.message : 'Не удалось удалить просчет');
     } finally {
       setDeletingRecountId('');
+    }
+  }
+
+  async function deleteActiveRecount() {
+    if (!activeRecount || !window.confirm('Удалить текущий просчет без возможности восстановления?')) return;
+
+    setDeletingRecountId(activeRecount.id);
+    setError('');
+    try {
+      await deleteRecount(activeRecount.id);
+      stopScanner();
+      setActiveRecount(null);
+      setValues({});
+      setSearch('');
+      setMenuOpen(false);
+      await refreshDashboard();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось удалить просчет');
+    } finally {
+      setDeletingRecountId('');
+    }
+  }
+
+  async function saveShopApiToken() {
+    const token = shopApiTokenInput.trim();
+    if (!token) {
+      setError('Введите токен API магазина');
+      return;
+    }
+
+    setShopApiTokenSaving(true);
+    setError('');
+    try {
+      const data = await updateAdminShopApiToken(token);
+      setShopApiTokenStatus(data);
+      setShopApiTokenInput('');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось сохранить токен API магазина');
+    } finally {
+      setShopApiTokenSaving(false);
     }
   }
 
@@ -1438,6 +1533,13 @@ export default function App() {
           >
             Просмотр логов
           </button>
+          <button
+            type="button"
+            className={`admin-tab ${adminTab === 'shop-api' ? 'active' : ''}`}
+            onClick={() => setAdminTab('shop-api')}
+          >
+            API магазина
+          </button>
         </div>
 
         {adminTab === 'users' ? (
@@ -1507,6 +1609,28 @@ export default function App() {
               {!adminUsers.length ? <div className="status">Пользователи не найдены</div> : null}
             </div>
           ) : null}
+        </section>
+        ) : null}
+
+        {adminTab === 'shop-api' ? (
+        <section className="panel">
+          <h3>API магазина</h3>
+          <div className="line mini">
+            Токен: {shopApiTokenStatus?.configured ? `установлен (последние символы: ${shopApiTokenStatus.tokenLast5 || '—'})` : 'не установлен'}
+          </div>
+          <label className="settings-field">
+            Новый токен
+            <input
+              type="password"
+              value={shopApiTokenInput}
+              onChange={event => setShopApiTokenInput(event.target.value)}
+              placeholder="Введите новый токен API магазина"
+              autoComplete="new-password"
+            />
+          </label>
+          <button type="button" onClick={saveShopApiToken} disabled={shopApiTokenSaving}>
+            {shopApiTokenSaving ? 'Сохранение...' : 'Сохранить токен'}
+          </button>
         </section>
         ) : null}
 
@@ -1629,8 +1753,17 @@ export default function App() {
     return (
       <div className="tsd-page">
         <header className={`scanner-shell tsd-scanner ${scanSuccessFlash ? 'scan-success-flash' : ''}`}>
-          <div className={`scanner-viewport ${scannerOn ? 'active' : ''}`}>
-            <video ref={videoRef} autoPlay muted playsInline />
+          <div
+            className={`scanner-viewport ${scannerOn ? 'active' : ''}`}
+            onClick={() => void focusScannerCamera()}
+            onDoubleClick={handleScannerDoubleClick}
+          >
+            <video
+              ref={videoRef}
+              autoPlay
+              muted
+              playsInline
+            />
             <div className="scanner-guide" />
           </div>
           <div className="scanner-meta">
@@ -1806,8 +1939,17 @@ export default function App() {
     <div className="recount-page">
       <div className="recount-top">
         <header className={`scanner-shell ${scanSuccessFlash ? 'scan-success-flash' : ''}`}>
-          <div className={`scanner-viewport ${scannerOn ? 'active' : ''}`}>
-            <video ref={videoRef} autoPlay muted playsInline />
+          <div
+            className={`scanner-viewport ${scannerOn ? 'active' : ''}`}
+            onClick={() => void focusScannerCamera()}
+            onDoubleClick={handleScannerDoubleClick}
+          >
+            <video
+              ref={videoRef}
+              autoPlay
+              muted
+              playsInline
+            />
             <div className="scanner-guide" />
           </div>
           <div className="scanner-meta">
@@ -1826,6 +1968,11 @@ export default function App() {
               <button type="button" onClick={openBindModal}>
                 {candidateCodes.length > 1 ? 'Выбрать товар' : 'Привязать вручную'}
               </button>
+            </div>
+          ) : null}
+          {hiddenCompletedMatch && !unresolvedBarcode ? (
+            <div className="scanner-unresolved">
+              <span>Позиция найдена, но она скрыта, потому что уже отошла.</span>
             </div>
           ) : null}
         </header>
@@ -1899,10 +2046,18 @@ export default function App() {
       <div className={`menu-popup ${menuOpen ? 'open' : ''}`}>
         <button type="button" onClick={handleSaveNow}>Сохранить сейчас</button>
         <button type="button" onClick={() => {
+          setMismatchFilter('all');
           setMismatchModalOpen(true);
           setMenuOpen(false);
         }}>
           Расхождения ({mismatchItems.length})
+        </button>
+        <button
+          type="button"
+          className={hideCompletedItems ? 'active' : ''}
+          onClick={() => setHideCompletedItems(prev => !prev)}
+        >
+          {hideCompletedItems ? 'Показывать отошедшее' : 'Скрыть отошедшее'}
         </button>
         <button type="button" onClick={() => {
           openCompleteModal();
@@ -1910,7 +2065,13 @@ export default function App() {
         }}>
           Завершить
         </button>
+        <button type="button" onClick={handleFinishWithoutPdf} disabled={loading}>
+          Завершить без PDF
+        </button>
         <button type="button" onClick={goHome}>На главный</button>
+        <button type="button" className="danger" onClick={deleteActiveRecount} disabled={deletingRecountId === activeRecount?.id}>
+          {deletingRecountId === activeRecount?.id ? 'Удаление...' : 'Удалить просчет'}
+        </button>
       </div>
 
       <nav className="bottom-actions">
@@ -1942,6 +2103,22 @@ export default function App() {
         <div className="modal-backdrop" onClick={() => setMismatchModalOpen(false)}>
           <div className="modal-card" onClick={event => event.stopPropagation()}>
             <h3>Позиции с расхождениями</h3>
+            <div className="mismatch-filters">
+              <button
+                type="button"
+                className={mismatchFilter === 'all' ? 'active' : 'ghost'}
+                onClick={() => setMismatchFilter('all')}
+              >
+                Все
+              </button>
+              <button
+                type="button"
+                className={mismatchFilter === 'missing' ? 'active' : 'ghost'}
+                onClick={() => setMismatchFilter('missing')}
+              >
+                Пропущено
+              </button>
+            </div>
             {!mismatchItems.length ? <div className="status">Расхождений нет</div> : null}
             {mismatchItems.length ? (
               <div className="compact-table-wrap">
@@ -2026,7 +2203,6 @@ export default function App() {
               </label>
             ) : null}
             <button type="button" onClick={handleCompleteRecount} disabled={loading}>Скачать итоговый PDF и завершить</button>
-            <button type="button" className="ghost" onClick={handleFinishWithoutPdf} disabled={loading}>Выйти в меню</button>
             <button type="button" className="ghost" onClick={() => setCompleteModalOpen(false)}>Отмена</button>
           </div>
         </div>
