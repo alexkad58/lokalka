@@ -1583,25 +1583,9 @@ export default function App() {
                     <button
                       type="button"
                       className="ghost"
-                      onClick={() => resetDeviceBindingForUser(item.id)}
-                      disabled={activatingUserId === item.id}
-                    >
-                      Сбросить устройство
-                    </button>
-                    <button
-                      type="button"
-                      className="ghost"
-                      onClick={() => toggleDeviceBinding(item)}
-                      disabled={item.isAdmin || activatingUserId === item.id}
-                    >
-                      {item.deviceBindingDisabled ? 'Включить привязку' : 'Отключить привязку'}
-                    </button>
-                    <button
-                      type="button"
-                      className="ghost"
                       onClick={() => setExpandedUserId(item.id)}
                     >
-                      Настройки
+                      Управление
                     </button>
                   </div>
                 </article>
@@ -1615,7 +1599,7 @@ export default function App() {
         {adminTab === 'shop-api' ? (
         <section className="panel">
           <h3>API магазина</h3>
-          <div className="line mini">
+          <div className="admin-api-status line mini">
             Токен: {shopApiTokenStatus?.configured ? `установлен (последние символы: ${shopApiTokenStatus.tokenLast5 || '—'})` : 'не установлен'}
           </div>
           <label className="settings-field">
@@ -1628,9 +1612,11 @@ export default function App() {
               autoComplete="new-password"
             />
           </label>
-          <button type="button" onClick={saveShopApiToken} disabled={shopApiTokenSaving}>
-            {shopApiTokenSaving ? 'Сохранение...' : 'Сохранить токен'}
-          </button>
+          <div className="admin-api-actions">
+            <button type="button" onClick={saveShopApiToken} disabled={shopApiTokenSaving}>
+              {shopApiTokenSaving ? 'Сохранение...' : 'Сохранить токен'}
+            </button>
+          </div>
         </section>
         ) : null}
 
@@ -1710,6 +1696,24 @@ export default function App() {
                 </div>
                 <div className="line mini">Дата регистрации: {formatStartDate(targetUser.createdAt)}</div>
 
+                <div className="admin-account-actions">
+                  <button
+                    type="button"
+                    className="ghost"
+                    onClick={() => resetDeviceBindingForUser(targetUser.id)}
+                    disabled={activatingUserId === targetUser.id}
+                  >
+                    {activatingUserId === targetUser.id ? 'Подождите...' : 'Сбросить привязку устройства'}
+                  </button>
+                  <button
+                    type="button"
+                    className="ghost"
+                    onClick={() => toggleDeviceBinding(targetUser)}
+                    disabled={targetUser.isAdmin || activatingUserId === targetUser.id}
+                  >
+                    {targetUser.deviceBindingDisabled ? 'Включить ограничение устройства' : 'Отключить ограничение устройства'}
+                  </button>
+                </div>
                 <button
                   type="button"
                   className="danger"

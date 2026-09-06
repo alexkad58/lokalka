@@ -145,10 +145,13 @@ button.ghost {
 .admin-tabs {
   display: flex;
   gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 2px;
 }
 
 .admin-tab {
   flex: 1;
+  min-width: max-content;
   padding: 10px;
   border-radius: 10px;
   background: rgba(25, 35, 53, 0.86);
@@ -261,6 +264,24 @@ button.danger {
   gap: 8px;
   max-height: 56vh;
   overflow-y: auto;
+}
+
+.admin-api-status {
+  padding: 9px 10px;
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+  background: rgba(17, 24, 36, 0.72);
+}
+
+.admin-api-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.admin-account-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
 }
 
 .admin-logs-toolbar {
@@ -397,9 +418,9 @@ button.danger {
 
 .admin-user-actions {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   gap: 6px;
-  min-width: 140px;
+  min-width: 200px;
 }
 
 .admin-user-actions button {
@@ -537,6 +558,31 @@ button.danger {
 
 @media (max-width: 520px) {
   .tsd-code-visuals {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-actions-row,
+  .admin-logs-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .admin-days-input,
+  .admin-logs-toolbar > button,
+  .admin-api-actions button {
+    width: 100%;
+  }
+
+  .admin-user-card {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .admin-user-actions {
+    min-width: 0;
+  }
+
+  .admin-account-actions {
     grid-template-columns: 1fr;
   }
 }
