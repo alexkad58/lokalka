@@ -10,3 +10,5 @@ server/barcode-cache.json
 .DS_Store
 Thumbs.db
 .local/
+/todo.md
+todo.md

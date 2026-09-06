@@ -12,6 +12,7 @@ import {
   completeRecount,
   createRecountFromPdf,
   deleteAdminUser,
+  deleteRecount,
   finishRecountWithoutPdf,
   getAdminLogs,
   getAdminUsers,
@@ -26,6 +27,7 @@ import {
   resolveBarcode,
   saveRecountProgress,
   setAuthToken,
+  setUserDeviceBindingDisabled,
   updateAccountSettings
 } from './api';
 
@@ -262,6 +264,7 @@ export default function App() {
   const [activatingUserId, setActivatingUserId] = useState('');
   const [expandedUserId, setExpandedUserId] = useState('');
   const [deletingUserId, setDeletingUserId] = useState('');
+  const [deletingRecountId, setDeletingRecountId] = useState('');
 
   const [activeRecount, setActiveRecount] = useState(null);
   const [values, setValues] = useState({});
@@ -889,9 +892,10 @@ export default function App() {
   }
 
   function handleTsdScan(code) {
-    const normalizedCode = normalizeScannedCode(code);
-    const qrResult = parseTsdQr(normalizedCode);
-    if (String(code).trim().startsWith('CEN;')) {
+    const rawCode = String(code || '').trim();
+    const normalizedCode = normalizeScannedCode(rawCode);
+    const qrResult = parseTsdQr(rawCode);
+    if (rawCode.startsWith('CEN;')) {
       if (!qrResult) {
         setScannerStatus('Неверный формат: ' + code);
         track('tsd_qr_rejected', { reason: 'invalid_format' });
@@ -1131,16 +1135,23 @@ export default function App() {
   function appendToActiveFact(char) {
     if (!activeFactCode) return;
     triggerHaptic(18, 'tap');
-    const current = String(values[activeFactCode] ?? '');
-    if (char === '+') {
-      if (!current || current.endsWith('+')) return;
-      updateFact(activeFactCode, `${current}+`);
-      return;
-    }
+    setValues(prev => {
+      const current = String(prev[activeFactCode] ?? '');
+      if (char === '+') {
+        if (!current || current.endsWith('+')) return prev;
+        return { ...prev, [activeFactCode]: sanitizeFactExpression(`${current}+`) };
+      }
 
-    if (/^\d$/.test(char)) {
-      updateFact(activeFactCode, `${current}${char}`);
-    }
+      if (/^\d$/.test(char)) {
+        return { ...prev, [activeFactCode]: sanitizeFactExpression(`${current}${char}`) };
+      }
+
+      return prev;
+    });
+  }
+
+  function preventFactKeypadFocusLoss(event) {
+    event.preventDefault();
   }
 
   function eraseActiveFact() {
@@ -1303,6 +1314,35 @@ export default function App() {
     }
   }
 
+  async function deletePreviousRecount(recountId) {
+    if (!window.confirm('Удалить этот просчет без возможности восстановления?')) return;
+
+    setDeletingRecountId(recountId);
+    setError('');
+    try {
+      await deleteRecount(recountId);
+      await refreshDashboard();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось удалить просчет');
+    } finally {
+      setDeletingRecountId('');
+    }
+  }
+
+  async function toggleDeviceBinding(targetUser) {
+    setActivatingUserId(targetUser.id);
+    setError('');
+    try {
+      await setUserDeviceBindingDisabled(targetUser.id, !targetUser.deviceBindingDisabled);
+      await refreshAdminUsers();
+      await refreshAdminLogs(adminLogLevel);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось изменить ограничение привязки');
+    } finally {
+      setActivatingUserId('');
+    }
+  }
+
   function openSettings() {
     setDefaultCounterNameInput(user?.defaultCounterName || '');
     setSettingsOpen(true);
@@ -1449,6 +1489,14 @@ export default function App() {
                     <button
                       type="button"
                       className="ghost"
+                      onClick={() => toggleDeviceBinding(item)}
+                      disabled={item.isAdmin || activatingUserId === item.id}
+                    >
+                      {item.deviceBindingDisabled ? 'Включить привязку' : 'Отключить привязку'}
+                    </button>
+                    <button
+                      type="button"
+                      className="ghost"
                       onClick={() => setExpandedUserId(item.id)}
                     >
                       Настройки
@@ -1533,6 +1581,9 @@ export default function App() {
                 <h3>Настройки аккаунта: {targetUser.login}</h3>
                 <div className="line mini">Статус: {formatSubscriptionStatusLabel(targetUser)}</div>
                 <div className="line mini">Устройство: {targetUser.deviceBound ? 'Привязано' : 'Не привязано'}</div>
+                <div className="line mini">
+                  Ограничение устройства: {targetUser.deviceBindingDisabled ? 'Отключено' : 'Включено'}
+                </div>
                 <div className="line mini">Дата регистрации: {formatStartDate(targetUser.createdAt)}</div>
 
                 <button
@@ -1704,6 +1755,14 @@ export default function App() {
                 <div className="line mini">Итог: {formatRub(item.totalSumRub)}</div>
                 <div className="line mini">Дата начала: {formatStartDate(item.createdAt)}</div>
                 <div className="line mini">Просчитывающий: {item.counterName || '-'}</div>
+                <button
+                  type="button"
+                  className="danger history-delete-btn"
+                  onClick={() => deletePreviousRecount(item.id)}
+                  disabled={deletingRecountId === item.id}
+                >
+                  {deletingRecountId === item.id ? 'Удаление...' : 'Удалить просчет'}
+                </button>
               </article>
             ))}
           </div>
@@ -1863,18 +1922,18 @@ export default function App() {
       {activeFactCode ? (
         <div ref={keypadRef} className="fact-keypad">
           <div className="fact-keypad-grid">
-            <button type="button" onMouseDown={event => event.preventDefault()} onClick={() => appendToActiveFact('1')}>1</button>
-            <button type="button" onMouseDown={event => event.preventDefault()} onClick={() => appendToActiveFact('2')}>2</button>
-            <button type="button" onMouseDown={event => event.preventDefault()} onClick={() => appendToActiveFact('3')}>3</button>
-            <button type="button" onMouseDown={event => event.preventDefault()} onClick={() => appendToActiveFact('4')}>4</button>
-            <button type="button" onMouseDown={event => event.preventDefault()} onClick={() => appendToActiveFact('5')}>5</button>
-            <button type="button" onMouseDown={event => event.preventDefault()} onClick={() => appendToActiveFact('6')}>6</button>
-            <button type="button" onMouseDown={event => event.preventDefault()} onClick={() => appendToActiveFact('7')}>7</button>
-            <button type="button" onMouseDown={event => event.preventDefault()} onClick={() => appendToActiveFact('8')}>8</button>
-            <button type="button" onMouseDown={event => event.preventDefault()} onClick={() => appendToActiveFact('9')}>9</button>
-            <button type="button" onMouseDown={event => event.preventDefault()} onClick={() => appendToActiveFact('+')}>+</button>
-            <button type="button" onMouseDown={event => event.preventDefault()} onClick={() => appendToActiveFact('0')}>0</button>
-            <button type="button" onMouseDown={event => event.preventDefault()} onClick={eraseActiveFact}>⌫</button>
+            <button type="button" onPointerDown={preventFactKeypadFocusLoss} onClick={() => appendToActiveFact('1')}>1</button>
+            <button type="button" onPointerDown={preventFactKeypadFocusLoss} onClick={() => appendToActiveFact('2')}>2</button>
+            <button type="button" onPointerDown={preventFactKeypadFocusLoss} onClick={() => appendToActiveFact('3')}>3</button>
+            <button type="button" onPointerDown={preventFactKeypadFocusLoss} onClick={() => appendToActiveFact('4')}>4</button>
+            <button type="button" onPointerDown={preventFactKeypadFocusLoss} onClick={() => appendToActiveFact('5')}>5</button>
+            <button type="button" onPointerDown={preventFactKeypadFocusLoss} onClick={() => appendToActiveFact('6')}>6</button>
+            <button type="button" onPointerDown={preventFactKeypadFocusLoss} onClick={() => appendToActiveFact('7')}>7</button>
+            <button type="button" onPointerDown={preventFactKeypadFocusLoss} onClick={() => appendToActiveFact('8')}>8</button>
+            <button type="button" onPointerDown={preventFactKeypadFocusLoss} onClick={() => appendToActiveFact('9')}>9</button>
+            <button type="button" onPointerDown={preventFactKeypadFocusLoss} onClick={() => appendToActiveFact('+')}>+</button>
+            <button type="button" onPointerDown={preventFactKeypadFocusLoss} onClick={() => appendToActiveFact('0')}>0</button>
+            <button type="button" onPointerDown={preventFactKeypadFocusLoss} onClick={eraseActiveFact}>⌫</button>
           </div>
         </div>
       ) : null}
