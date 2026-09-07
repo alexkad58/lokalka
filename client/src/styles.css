@@ -36,17 +36,24 @@ body {
 }
 
 button,
-input {
+input,
+textarea {
   font: inherit;
 }
 
-input {
+input,
+textarea {
   width: 100%;
   border: 1px solid rgba(255, 255, 255, 0.12);
   background: rgba(17, 24, 36, 0.85);
   color: var(--text);
   border-radius: 12px;
   padding: 11px 12px;
+}
+
+textarea {
+  resize: vertical;
+  min-height: 96px;
 }
 
 button {
@@ -187,6 +194,38 @@ button.danger {
   margin: 0 0 10px;
 }
 
+.home-history-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.home-history-head h3 {
+  margin: 0;
+}
+
+.home-subtabs {
+  display: inline-grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  padding: 4px;
+  border-radius: 12px;
+  background: rgba(19, 27, 41, 0.92);
+}
+
+.home-subtab {
+  min-width: 112px;
+  border-radius: 10px;
+  padding: 8px 10px;
+  background: transparent;
+}
+
+.home-subtab.active {
+  background: linear-gradient(135deg, #1d6e43, #2dc770);
+}
+
 .compact-card {
   display: flex;
   flex-direction: column;
@@ -212,6 +251,45 @@ button.danger {
   padding: 9px;
 }
 
+.patchnote-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 42vh;
+  overflow-y: auto;
+}
+
+.patchnote-card {
+  background: rgba(16, 22, 34, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-left: 4px solid var(--accent);
+  border-radius: 10px;
+  padding: 10px;
+}
+
+.patchnote-card h4 {
+  margin: 2px 0 8px;
+  line-height: 1.3;
+}
+
+.patchnote-card p {
+  margin: 0;
+  color: #dce6ff;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+}
+
+.patchnote-date {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.patchnote-toggle {
+  margin-top: 10px;
+  padding: 8px 10px;
+}
+
 .history-item-head {
   display: flex;
   align-items: center;
@@ -224,6 +302,16 @@ button.danger {
   width: 100%;
   padding: 7px 12px;
   background: linear-gradient(135deg, #246a57, #2dc770);
+}
+
+.home-tools-row {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+}
+
+.keypad-lab-home-btn {
+  width: 100%;
 }
 
 .history-eye-btn {
@@ -279,6 +367,35 @@ button.danger {
 }
 
 .admin-account-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.admin-patchnote-list {
+  margin-top: 10px;
+  max-height: 52vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.patchnote-editor-card {
+  background: rgba(16, 22, 34, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.patchnote-editor-card h4 {
+  margin: 0;
+}
+
+.patchnote-editor-actions {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
@@ -561,6 +678,19 @@ button.danger {
     grid-template-columns: 1fr;
   }
 
+  .home-history-head {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .home-subtabs {
+    width: 100%;
+  }
+
+  .home-subtab {
+    min-width: 0;
+  }
+
   .admin-actions-row,
   .admin-logs-toolbar {
     align-items: stretch;
@@ -583,6 +713,10 @@ button.danger {
   }
 
   .admin-account-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .patchnote-editor-actions {
     grid-template-columns: 1fr;
   }
 }
@@ -843,6 +977,9 @@ button.danger {
   padding: 8px 10px;
   background: rgba(5, 8, 14, 0.96);
   border-top: 1px solid rgba(255, 255, 255, 0.1);
+  touch-action: manipulation;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 .fact-keypad-grid {
@@ -857,6 +994,16 @@ button.danger {
   padding: 12px 10px;
   font-size: 1rem;
   font-weight: 700;
+  touch-action: manipulation;
+}
+
+.keypad-lab-page .scanner-viewport,
+.keypad-lab-header .scanner-guide {
+  display: none;
+}
+
+.keypad-lab-status {
+  color: #cfe0ff;
 }
 
 .modal-backdrop {

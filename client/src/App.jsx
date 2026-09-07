@@ -9,14 +9,19 @@ import {
 import { markCompletionSurveyPending, track } from './analytics';
 import {
   activateUserSubscription,
+  bindBarcodeToItem,
   completeRecount,
+  createAdminPatchNote,
   createRecountFromPdf,
+  deleteAdminPatchNote,
   deleteAdminUser,
   deleteRecount,
   finishRecountWithoutPdf,
   getAdminLogs,
+  getAdminPatchNotes,
   getAdminShopApiSettings,
   getAdminUsers,
+  getPatchNotes,
   getRecount,
   getRecounts,
   login,
@@ -29,9 +34,12 @@ import {
   saveRecountProgress,
   setAuthToken,
   setUserDeviceBindingDisabled,
+  updateAdminPatchNote,
   updateAccountSettings,
   updateAdminShopApiToken
 } from './api';
+import FactKeypad from './components/FactKeypad';
+import KeypadSandboxPage from './KeypadSandboxPage';
 
 const TOKEN_KEY = 'lokalka_auth_token';
 const BARCODE_CACHE_STORAGE_KEY = 'barcode_article_cache_v1';
@@ -45,6 +53,7 @@ const ADMIN_LOG_LEVEL_TABS = [
   { key: 'debug', label: 'Debug' },
   { key: 'trace', label: 'Trace' }
 ];
+const PATCHNOTE_PREVIEW_LIMIT = 220;
 
 function normalizeQuery(value) {
   return String(value || '')
@@ -52,6 +61,35 @@ function normalizeQuery(value) {
     .replace(/ё/g, 'е')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function normalizeSearchText(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/ё/g, 'е')
+    .replace(/ж\s*\/\s*б/g, 'жб')
+    .replace(/№/g, ' ')
+    .replace(/[^a-zа-я0-9]+/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function tokenizeSearch(value) {
+  const normalized = normalizeSearchText(value);
+  return normalized ? normalized.split(' ') : [];
+}
+
+function matchesSearchQuery(query, ...candidates) {
+  const tokens = tokenizeSearch(query);
+  if (!tokens.length) return true;
+
+  const haystacks = candidates
+    .map(candidate => normalizeSearchText(candidate))
+    .filter(Boolean);
+
+  if (!haystacks.length) return false;
+
+  return tokens.every(token => haystacks.some(text => text.includes(token)));
 }
 
 function detectPackageType(productName) {
@@ -191,6 +229,36 @@ function normalizeBarcodeValue(value) {
   return String(value || '').trim();
 }
 
+function normalizePatchNote(note) {
+  return {
+    id: String(note?.id || ''),
+    date: String(note?.date || '').trim(),
+    title: String(note?.title || '').trim(),
+    text: String(note?.text || '').trim()
+  };
+}
+
+function sortPatchNotes(items) {
+  const source = Array.isArray(items) ? items : [];
+  return source
+    .map(normalizePatchNote)
+    .filter(item => item.id && item.title && item.text)
+    .sort((a, b) => {
+      const tsA = Date.parse(a.date || '');
+      const tsB = Date.parse(b.date || '');
+      if (Number.isNaN(tsA) && Number.isNaN(tsB)) return 0;
+      if (Number.isNaN(tsA)) return 1;
+      if (Number.isNaN(tsB)) return -1;
+      return tsB - tsA;
+    });
+}
+
+function formatPatchNoteDate(value) {
+  const parsed = new Date(value || '');
+  if (Number.isNaN(parsed.getTime())) return value || 'Без даты';
+  return parsed.toLocaleDateString('ru-RU');
+}
+
 function formatTsdDate(dateValue = new Date()) {
   const date = dateValue instanceof Date ? dateValue : new Date(dateValue);
   return date.toLocaleDateString('ru-RU', {
@@ -254,8 +322,13 @@ export default function App() {
   const [authError, setAuthError] = useState('');
 
   const [homeLoading, setHomeLoading] = useState(false);
+  const [homeTab, setHomeTab] = useState('recounts');
   const [activeSummary, setActiveSummary] = useState(null);
   const [previousRecounts, setPreviousRecounts] = useState([]);
+  const [patchNotes, setPatchNotes] = useState([]);
+  const [patchNotesLoading, setPatchNotesLoading] = useState(false);
+  const [patchNotesError, setPatchNotesError] = useState('');
+  const [expandedPatchNotes, setExpandedPatchNotes] = useState({});
   const [adminUsers, setAdminUsers] = useState([]);
   const [adminTab, setAdminTab] = useState('users');
   const [adminLogLevel, setAdminLogLevel] = useState('all');
@@ -270,6 +343,13 @@ export default function App() {
   const [expandedUserId, setExpandedUserId] = useState('');
   const [deletingUserId, setDeletingUserId] = useState('');
   const [deletingRecountId, setDeletingRecountId] = useState('');
+  const [adminPatchNotes, setAdminPatchNotes] = useState([]);
+  const [adminPatchNotesLoading, setAdminPatchNotesLoading] = useState(false);
+  const [adminPatchNotesSavingId, setAdminPatchNotesSavingId] = useState('');
+  const [adminPatchNotesDeletingId, setAdminPatchNotesDeletingId] = useState('');
+  const [newPatchNoteDate, setNewPatchNoteDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [newPatchNoteTitle, setNewPatchNoteTitle] = useState('');
+  const [newPatchNoteText, setNewPatchNoteText] = useState('');
 
   const [activeRecount, setActiveRecount] = useState(null);
   const [values, setValues] = useState({});
@@ -290,6 +370,7 @@ export default function App() {
   const [mismatchModalOpen, setMismatchModalOpen] = useState(false);
   const [completeModalOpen, setCompleteModalOpen] = useState(false);
   const [unresolvedBarcode, setUnresolvedBarcode] = useState('');
+  const [bindTargetBarcode, setBindTargetBarcode] = useState('');
   const [candidateCodes, setCandidateCodes] = useState([]);
   const [bindModalOpen, setBindModalOpen] = useState(false);
   const [bindSearch, setBindSearch] = useState('');
@@ -307,6 +388,9 @@ export default function App() {
   ));
   const [tsdOpen, setTsdOpen] = useState(() => (
     typeof window !== 'undefined' && window.location.pathname === '/tsd'
+  ));
+  const [keypadLabOpen, setKeypadLabOpen] = useState(() => (
+    import.meta.env.DEV && typeof window !== 'undefined' && window.location.pathname === '/keypad-lab'
   ));
   const [tsdPriceModalOpen, setTsdPriceModalOpen] = useState(false);
   const [tsdPriceInput, setTsdPriceInput] = useState('');
@@ -330,6 +414,7 @@ export default function App() {
   const itemsFeedRef = useRef(null);
   const itemCardRefs = useRef(new Map());
   const keypadRef = useRef(null);
+  const blurGuardUntilRef = useRef(0);
 
   useEffect(() => {
     if (!activeFactCode) return undefined;
@@ -358,8 +443,24 @@ export default function App() {
   }, [activeFactCode]);
 
   useEffect(() => {
+    if (!activeFactCode) return undefined;
+
+    const closeKeypadOnOutsidePointerDown = event => {
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      if (target.closest('.fact-keypad, .fact-input')) return;
+      setActiveFactCode('');
+    };
+
+    document.addEventListener('pointerdown', closeKeypadOnOutsidePointerDown, true);
+    return () => document.removeEventListener('pointerdown', closeKeypadOnOutsidePointerDown, true);
+  }, [activeFactCode]);
+
+  useEffect(() => {
     const handlePopState = () => {
-      setTsdOpen(window.location.pathname === '/tsd');
+      const path = window.location.pathname;
+      setTsdOpen(path === '/tsd');
+      setKeypadLabOpen(path === '/keypad-lab');
     };
 
     window.addEventListener('popstate', handlePopState);
@@ -438,15 +539,16 @@ export default function App() {
         setUser(nextUser);
 
         if (nextUser?.isAdmin) {
-          return Promise.all([refreshAdminUsers(), refreshAdminLogs('all')]);
+          return Promise.all([refreshAdminUsers(), refreshAdminLogs('all'), refreshAdminShopApiSettings(), refreshAdminPatchNotes()]);
         }
         if (!nextUser?.subscriptionActive) {
           setActiveRecount(null);
           setActiveSummary(null);
           setPreviousRecounts([]);
+          setPatchNotes([]);
           return;
         }
-        return refreshDashboard();
+        return Promise.all([refreshDashboard(), refreshPatchNotes()]);
       })
       .catch(() => {
         handleLogout(true);
@@ -510,12 +612,9 @@ export default function App() {
   }, [activeRecount, values]);
 
   const filteredItems = useMemo(() => {
-    const query = normalizeQuery(search);
     const items = activeRecount?.items || [];
     return items.filter(item => {
-      const matchesQuery = !query
-        || normalizeQuery(item.code).includes(query)
-        || normalizeQuery(item.name).includes(query);
+      const matchesQuery = matchesSearchQuery(search, item.code, item.name);
       if (!matchesQuery) return false;
       if (hideCompletedItems && computeRowState(item, values).delta === 0) return false;
       return true;
@@ -524,24 +623,15 @@ export default function App() {
 
   const hiddenCompletedMatch = useMemo(() => {
     if (!hideCompletedItems || !search.trim()) return false;
-    const query = normalizeQuery(search);
     return (activeRecount?.items || []).some(item => {
-      const matchesQuery = normalizeQuery(item.code).includes(query)
-        || normalizeQuery(item.name).includes(query);
+      const matchesQuery = matchesSearchQuery(search, item.code, item.name);
       return matchesQuery && computeRowState(item, values).delta === 0;
     });
   }, [activeRecount, search, hideCompletedItems, values]);
 
   const bindFilteredItems = useMemo(() => {
-    const query = normalizeQuery(bindSearch);
     const items = activeRecount?.items || [];
-    if (!query) return items;
-
-    return items.filter(item => {
-      const code = normalizeQuery(item.code);
-      const name = normalizeQuery(item.name);
-      return code.includes(query) || name.includes(query);
-    });
+    return items.filter(item => matchesSearchQuery(bindSearch, item.code, item.name));
   }, [activeRecount, bindSearch]);
 
   const candidateItems = useMemo(() => {
@@ -564,6 +654,9 @@ export default function App() {
         .filter(item => item.delta !== 0)
         .filter(item => mismatchFilter !== 'missing' || item.fact === null);
       }, [activeRecount, values, mismatchFilter]);
+
+  const sortedPatchNotes = useMemo(() => sortPatchNotes(patchNotes), [patchNotes]);
+  const sortedAdminPatchNotes = useMemo(() => sortPatchNotes(adminPatchNotes), [adminPatchNotes]);
 
   function valueMapForProgress(items, valueMap) {
     const source = items && Array.isArray(items) ? items : [];
@@ -620,6 +713,19 @@ export default function App() {
     }
   }
 
+  async function refreshPatchNotes() {
+    setPatchNotesLoading(true);
+    setPatchNotesError('');
+    try {
+      const data = await getPatchNotes();
+      setPatchNotes(Array.isArray(data?.items) ? data.items : []);
+    } catch (err) {
+      setPatchNotesError(err instanceof Error ? err.message : 'Не удалось загрузить патчноуты');
+    } finally {
+      setPatchNotesLoading(false);
+    }
+  }
+
   async function refreshAdminUsers() {
     setHomeLoading(true);
     setError('');
@@ -657,6 +763,19 @@ export default function App() {
     }
   }
 
+  async function refreshAdminPatchNotes() {
+    setAdminPatchNotesLoading(true);
+    setError('');
+    try {
+      const data = await getAdminPatchNotes();
+      setAdminPatchNotes(Array.isArray(data?.items) ? data.items : []);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось загрузить патчноуты для админки');
+    } finally {
+      setAdminPatchNotesLoading(false);
+    }
+  }
+
   async function bootstrapAuth(result) {
     const nextToken = String(result?.token || '').trim();
     if (!nextToken) throw new Error('Сервер не вернул токен');
@@ -668,7 +787,7 @@ export default function App() {
     setUser(nextUser);
 
     if (nextUser?.isAdmin) {
-      await Promise.all([refreshAdminUsers(), refreshAdminLogs('all'), refreshAdminShopApiSettings()]);
+      await Promise.all([refreshAdminUsers(), refreshAdminLogs('all'), refreshAdminShopApiSettings(), refreshAdminPatchNotes()]);
       return;
     }
 
@@ -676,7 +795,7 @@ export default function App() {
       return;
     }
 
-    await refreshDashboard();
+    await Promise.all([refreshDashboard(), refreshPatchNotes()]);
   }
 
   async function handleAuthSubmit(event) {
@@ -718,6 +837,10 @@ export default function App() {
     setAdminLogLevel('all');
     setAdminLogEntries([]);
     setAdminLogCounts({});
+    setPatchNotes([]);
+    setPatchNotesError('');
+    setExpandedPatchNotes({});
+    setAdminPatchNotes([]);
     setActiveRecount(null);
     setValues({});
     setSearch('');
@@ -726,6 +849,84 @@ export default function App() {
     setCompleteModalOpen(false);
     setSettingsOpen(false);
     setExpandedUserId('');
+  }
+
+  function togglePatchNoteExpanded(id) {
+    setExpandedPatchNotes(prev => ({
+      ...prev,
+      [id]: !prev[id]
+    }));
+  }
+
+  function updateAdminPatchNoteField(id, field, value) {
+    setAdminPatchNotes(prev => prev.map(item => (
+      String(item.id) === String(id)
+        ? { ...item, [field]: value }
+        : item
+    )));
+  }
+
+  async function createPatchNoteFromAdmin() {
+    const title = newPatchNoteTitle.trim();
+    const text = newPatchNoteText.trim();
+    const date = newPatchNoteDate.trim();
+    if (!title || !text || !date) {
+      setError('Заполните дату, заголовок и текст патчноута');
+      return;
+    }
+
+    setAdminPatchNotesSavingId('new');
+    setError('');
+    try {
+      await createAdminPatchNote({ date, title, text });
+      setNewPatchNoteTitle('');
+      setNewPatchNoteText('');
+      await Promise.all([refreshAdminPatchNotes(), refreshPatchNotes()]);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось создать патчноут');
+    } finally {
+      setAdminPatchNotesSavingId('');
+    }
+  }
+
+  async function savePatchNoteFromAdmin(item) {
+    const normalized = normalizePatchNote(item);
+    if (!normalized.id || !normalized.date || !normalized.title || !normalized.text) {
+      setError('Поля date, title и text обязательны для сохранения');
+      return;
+    }
+
+    setAdminPatchNotesSavingId(normalized.id);
+    setError('');
+    try {
+      await updateAdminPatchNote(normalized.id, {
+        date: normalized.date,
+        title: normalized.title,
+        text: normalized.text
+      });
+      await Promise.all([refreshAdminPatchNotes(), refreshPatchNotes()]);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось сохранить патчноут');
+    } finally {
+      setAdminPatchNotesSavingId('');
+    }
+  }
+
+  async function deletePatchNoteFromAdmin(id) {
+    if (!window.confirm('Удалить патчноут без возможности восстановления?')) return;
+    const normalizedId = String(id || '').trim();
+    if (!normalizedId) return;
+
+    setAdminPatchNotesDeletingId(normalizedId);
+    setError('');
+    try {
+      await deleteAdminPatchNote(normalizedId);
+      await Promise.all([refreshAdminPatchNotes(), refreshPatchNotes()]);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось удалить патчноут');
+    } finally {
+      setAdminPatchNotesDeletingId('');
+    }
   }
 
   function getItemCodes() {
@@ -743,6 +944,7 @@ export default function App() {
       setValues(recount.values || {});
       setSearch(recount.search || '');
       setUnresolvedBarcode('');
+      setBindTargetBarcode('');
       setCandidateCodes([]);
       setBindModalOpen(false);
 
@@ -770,6 +972,7 @@ export default function App() {
       setMismatchModalOpen(false);
       setCompleteModalOpen(false);
       setUnresolvedBarcode('');
+      setBindTargetBarcode('');
       setCandidateCodes([]);
       setBindModalOpen(false);
 
@@ -797,6 +1000,7 @@ export default function App() {
       setActiveRecount(recount);
       setValues(recount.values || {});
       setSearch(recount.search || '');
+      setBindTargetBarcode('');
       setActiveSummary(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось загрузить PDF');
@@ -877,6 +1081,7 @@ export default function App() {
     lastCodeRef.current = normalizedCode;
     lastCodeTsRef.current = now;
     setLastCode(normalizedCode);
+    setBindTargetBarcode(normalizedCode);
 
     if (tsdOpen) {
       handleTsdScan(code);
@@ -892,7 +1097,7 @@ export default function App() {
         setSearch(codes[0]);
         setScannerStatus(`Штрихкод считан (${resolved.source || 'cache'})`);
         setUnresolvedBarcode('');
-        setCandidateCodes([]);
+        setCandidateCodes(codes);
         triggerScanSuccessFlash();
         track('barcode_scanned', { area: 'recount', resolved: true });
         track('barcode_lookup_succeeded', { source: resolved.source || 'unknown' });
@@ -971,6 +1176,7 @@ export default function App() {
     stopScanner();
     window.history.pushState({}, '', '/tsd');
     setTsdOpen(true);
+    setKeypadLabOpen(false);
     setTsdResult(null);
     setTsdPriceModalOpen(false);
     setScannerStatus('Сканер выключен');
@@ -985,7 +1191,26 @@ export default function App() {
     setTsdPriceModalOpen(false);
   }
 
+  function openKeypadLab() {
+    if (!import.meta.env.DEV) return;
+    stopScanner();
+    window.history.pushState({}, '', '/keypad-lab');
+    setTsdOpen(false);
+    setKeypadLabOpen(true);
+  }
+
+  function closeKeypadLab() {
+    window.history.replaceState({}, '', '/');
+    setKeypadLabOpen(false);
+  }
+
   function openBindModal() {
+    const targetBarcode = normalizeBarcodeValue(bindTargetBarcode || unresolvedBarcode || lastCode);
+    if (!targetBarcode) {
+      setScannerStatus('Сначала отсканируйте штрихкод');
+      return;
+    }
+    setBindTargetBarcode(targetBarcode);
     setBindSearch('');
     setBindModalOpen(true);
   }
@@ -995,26 +1220,77 @@ export default function App() {
     setBindSearch('');
   }
 
-  function bindBarcodeToItem(itemCode) {
-    const barcode = normalizeBarcodeValue(unresolvedBarcode);
+  function reassignBarcodeToItem(cache, barcode, itemCode) {
+    const normalizedItemCode = String(itemCode);
+    const nextCache = {};
+
+    for (const [mappedBarcode, record] of Object.entries(cache || {})) {
+      const codes = Array.isArray(record?.codes)
+        ? record.codes.map(String)
+        : record?.code ? [String(record.code)] : [];
+      const remainingCodes = mappedBarcode === barcode
+        ? codes
+        : codes.filter(code => code !== normalizedItemCode);
+
+      if (remainingCodes.length) {
+        nextCache[mappedBarcode] = {
+          ...record,
+          codes: Array.from(new Set(remainingCodes))
+        };
+      }
+    }
+
+    const currentCodes = nextCache[barcode]?.codes || [];
+    nextCache[barcode] = {
+      ...(nextCache[barcode] || {}),
+      codes: Array.from(new Set([...currentCodes, normalizedItemCode])),
+      source: 'manual'
+    };
+
+    return nextCache;
+  }
+
+  async function bindBarcodeToSelectedItem(itemCode, confirm = false) {
+    const barcode = normalizeBarcodeValue(bindTargetBarcode || unresolvedBarcode || lastCode);
     if (!barcode) return;
+    if (!activeRecount?.id) return;
 
-    setBarcodeCache(prev => {
-      const existingCodes = prev[barcode]?.codes || [];
-      const merged = Array.from(new Set([...existingCodes, String(itemCode)]));
-      return {
-        ...prev,
-        [barcode]: {
-          codes: merged,
-          source: 'manual'
+    const normalizedItemCode = String(itemCode);
+
+    try {
+      await bindBarcodeToItem({
+        barcode,
+        itemCode: normalizedItemCode,
+        recountId: activeRecount.id,
+        confirm
+      });
+    } catch (err) {
+      const conflict = err?.status === 409 && err?.payload?.conflict === true;
+      if (conflict && !confirm) {
+        const existingBarcodes = Array.isArray(err?.payload?.existingBarcodes)
+          ? err.payload.existingBarcodes.map(String)
+          : [];
+        const oldBarcodeText = existingBarcodes.length ? existingBarcodes.join(', ') : 'неизвестно';
+        const approved = window.confirm(
+          `Код ${normalizedItemCode} уже привязан к штрихкоду ${oldBarcodeText}.\n\nПерепривязать его к штрихкоду ${barcode}?`
+        );
+        if (!approved) {
+          setScannerStatus('Перепривязка отменена');
+          return;
         }
-      };
-    });
+        await bindBarcodeToSelectedItem(normalizedItemCode, true);
+        return;
+      }
+      setError(err instanceof Error ? err.message : 'Не удалось привязать штрихкод');
+      return;
+    }
 
-    setSearch(String(itemCode));
+    setBarcodeCache(prev => reassignBarcodeToItem(prev, barcode, normalizedItemCode));
+
+    setSearch(normalizedItemCode);
     setScannerStatus('Штрихкод привязан вручную');
     setUnresolvedBarcode('');
-    setCandidateCodes([]);
+    setCandidateCodes([normalizedItemCode]);
     closeBindModal();
     triggerScanSuccessFlash();
     triggerHaptic(70, 'scan');
@@ -1183,7 +1459,12 @@ export default function App() {
   }
 
   function handleFactBlur() {
+    if (Date.now() < blurGuardUntilRef.current) return;
     setActiveFactCode('');
+  }
+
+  function keepFactKeypadOpen() {
+    blurGuardUntilRef.current = Date.now() + 600;
   }
 
   function appendToActiveFact(char) {
@@ -1202,10 +1483,6 @@ export default function App() {
 
       return prev;
     });
-  }
-
-  function preventFactKeypadFocusLoss(event) {
-    event.preventDefault();
   }
 
   function eraseActiveFact() {
@@ -1318,6 +1595,7 @@ export default function App() {
     setMismatchModalOpen(false);
     setCompleteModalOpen(false);
     setUnresolvedBarcode('');
+    setBindTargetBarcode('');
     setCandidateCodes([]);
     setBindModalOpen(false);
     await refreshDashboard();
@@ -1461,6 +1739,10 @@ export default function App() {
     }
   }
 
+  if (import.meta.env.DEV && keypadLabOpen) {
+    return <KeypadSandboxPage onClose={closeKeypadLab} />;
+  }
+
   if (!token && !tsdOpen) {
     return (
       <div className="auth-page">
@@ -1500,6 +1782,7 @@ export default function App() {
           >
             {authMode === 'login' ? 'Создать аккаунт' : 'У меня уже есть аккаунт'}
           </button>
+
         </form>
       </div>
     );
@@ -1539,6 +1822,16 @@ export default function App() {
             onClick={() => setAdminTab('shop-api')}
           >
             API магазина
+          </button>
+          <button
+            type="button"
+            className={`admin-tab ${adminTab === 'patchnotes' ? 'active' : ''}`}
+            onClick={() => {
+              setAdminTab('patchnotes');
+              void refreshAdminPatchNotes();
+            }}
+          >
+            Патчноуты
           </button>
         </div>
 
@@ -1617,6 +1910,104 @@ export default function App() {
               {shopApiTokenSaving ? 'Сохранение...' : 'Сохранить токен'}
             </button>
           </div>
+        </section>
+        ) : null}
+
+        {adminTab === 'patchnotes' ? (
+        <section className="panel">
+          <h3>Патчноуты</h3>
+          <div className="admin-actions-row">
+            <button type="button" className="ghost" onClick={() => refreshAdminPatchNotes()} disabled={adminPatchNotesLoading}>
+              {adminPatchNotesLoading ? 'Загрузка...' : 'Обновить список'}
+            </button>
+          </div>
+
+          <div className="patchnote-editor-card">
+            <h4>Новый патчноут</h4>
+            <label className="settings-field">
+              Дата
+              <input
+                type="date"
+                value={newPatchNoteDate}
+                onChange={event => setNewPatchNoteDate(event.target.value)}
+              />
+            </label>
+            <label className="settings-field">
+              Заголовок
+              <input
+                value={newPatchNoteTitle}
+                onChange={event => setNewPatchNoteTitle(event.target.value)}
+                placeholder="Краткий заголовок"
+              />
+            </label>
+            <label className="settings-field">
+              Текст
+              <textarea
+                value={newPatchNoteText}
+                onChange={event => setNewPatchNoteText(event.target.value)}
+                placeholder="Полный текст патчноута"
+                rows={5}
+              />
+            </label>
+            <button
+              type="button"
+              onClick={createPatchNoteFromAdmin}
+              disabled={adminPatchNotesSavingId === 'new'}
+            >
+              {adminPatchNotesSavingId === 'new' ? 'Сохранение...' : 'Добавить патчноут'}
+            </button>
+          </div>
+
+          {adminPatchNotesLoading ? <div className="status">Загрузка патчноутов...</div> : null}
+          {!adminPatchNotesLoading ? (
+            <div className="admin-patchnote-list">
+              {sortedAdminPatchNotes.map(item => (
+                <article key={item.id} className="patchnote-editor-card">
+                  <label className="settings-field">
+                    Дата
+                    <input
+                      type="date"
+                      value={item.date}
+                      onChange={event => updateAdminPatchNoteField(item.id, 'date', event.target.value)}
+                    />
+                  </label>
+                  <label className="settings-field">
+                    Заголовок
+                    <input
+                      value={item.title}
+                      onChange={event => updateAdminPatchNoteField(item.id, 'title', event.target.value)}
+                    />
+                  </label>
+                  <label className="settings-field">
+                    Текст
+                    <textarea
+                      value={item.text}
+                      onChange={event => updateAdminPatchNoteField(item.id, 'text', event.target.value)}
+                      rows={6}
+                    />
+                  </label>
+                  <div className="patchnote-editor-actions">
+                    <button
+                      type="button"
+                      onClick={() => void savePatchNoteFromAdmin(item)}
+                      disabled={adminPatchNotesSavingId === item.id || adminPatchNotesDeletingId === item.id}
+                    >
+                      {adminPatchNotesSavingId === item.id ? 'Сохранение...' : 'Сохранить'}
+                    </button>
+                    <button
+                      type="button"
+                      className="danger"
+                      onClick={() => void deletePatchNoteFromAdmin(item.id)}
+                      disabled={adminPatchNotesDeletingId === item.id || adminPatchNotesSavingId === item.id}
+                    >
+                      {adminPatchNotesDeletingId === item.id ? 'Удаление...' : 'Удалить'}
+                    </button>
+                  </div>
+                </article>
+              ))}
+              {!sortedAdminPatchNotes.length ? <div className="status">Патчноуты пока отсутствуют</div> : null}
+            </div>
+          ) : null}
         </section>
         ) : null}
 
@@ -1871,41 +2262,109 @@ export default function App() {
         </section>
 
         <section className="panel">
-          <h3>Завершенные локалки</h3>
-          {!previousRecounts.length ? <div className="status">История пустая</div> : null}
-          <div className="history-list">
-            {previousRecounts.map(item => (
-              <article key={item.id} className="history-item">
-                <div className="history-item-head">
-                  <div>{item.groupName || 'Без названия группы'}</div>
-                  <button
-                    type="button"
-                    className="history-eye-btn"
-                    title="Открыть для доработки"
-                    aria-label="Открыть для доработки"
-                    onClick={() => reopenPreviousRecount(item.id)}
-                    disabled={loading}
-                  >
-                    👁
-                  </button>
-                </div>
-                <div className="line mini">Итог: {formatRub(item.totalSumRub)}</div>
-                <div className="line mini">Дата начала: {formatStartDate(item.createdAt)}</div>
-                <div className="line mini">Просчитывающий: {item.counterName || '-'}</div>
-                <button
-                  type="button"
-                  className="danger history-delete-btn"
-                  onClick={() => deletePreviousRecount(item.id)}
-                  disabled={deletingRecountId === item.id}
-                >
-                  {deletingRecountId === item.id ? 'Удаление...' : 'Удалить просчет'}
-                </button>
-              </article>
-            ))}
+          <div className="home-history-head">
+            <h3>{homeTab === 'recounts' ? 'Завершенные локалки' : 'Патчноуты проекта'}</h3>
+            <div className="home-subtabs" role="tablist" aria-label="Разделы">
+              <button
+                type="button"
+                className={`home-subtab ${homeTab === 'recounts' ? 'active' : ''}`}
+                onClick={() => setHomeTab('recounts')}
+              >
+                Локалки
+              </button>
+              <button
+                type="button"
+                className={`home-subtab ${homeTab === 'patchnotes' ? 'active' : ''}`}
+                onClick={() => {
+                  setHomeTab('patchnotes');
+                  if (!patchNotes.length && !patchNotesLoading) {
+                    void refreshPatchNotes();
+                  }
+                }}
+              >
+                Патчноуты
+              </button>
+            </div>
           </div>
+
+          {homeTab === 'recounts' ? (
+            <>
+              {!previousRecounts.length ? <div className="status">История пустая</div> : null}
+              <div className="history-list">
+                {previousRecounts.map(item => (
+                  <article key={item.id} className="history-item">
+                    <div className="history-item-head">
+                      <div>{item.groupName || 'Без названия группы'}</div>
+                      <button
+                        type="button"
+                        className="history-eye-btn"
+                        title="Открыть для доработки"
+                        aria-label="Открыть для доработки"
+                        onClick={() => reopenPreviousRecount(item.id)}
+                        disabled={loading}
+                      >
+                        👁
+                      </button>
+                    </div>
+                    <div className="line mini">Итог: {formatRub(item.totalSumRub)}</div>
+                    <div className="line mini">Дата начала: {formatStartDate(item.createdAt)}</div>
+                    <div className="line mini">Просчитывающий: {item.counterName || '-'}</div>
+                    <button
+                      type="button"
+                      className="danger history-delete-btn"
+                      onClick={() => deletePreviousRecount(item.id)}
+                      disabled={deletingRecountId === item.id}
+                    >
+                      {deletingRecountId === item.id ? 'Удаление...' : 'Удалить просчет'}
+                    </button>
+                  </article>
+                ))}
+              </div>
+            </>
+          ) : null}
+
+          {homeTab === 'patchnotes' ? (
+            <>
+              {patchNotesLoading ? <div className="status">Загрузка патчноутов...</div> : null}
+              {patchNotesError ? <div className="status error">{patchNotesError}</div> : null}
+              {!patchNotesLoading && !patchNotesError && !sortedPatchNotes.length ? (
+                <div className="status">Патчноуты пока не добавлены</div>
+              ) : null}
+              {!patchNotesLoading && !patchNotesError ? (
+                <div className="patchnote-list">
+                  {sortedPatchNotes.map(note => {
+                    const isExpanded = Boolean(expandedPatchNotes[note.id]);
+                    const hasLongText = note.text.length > PATCHNOTE_PREVIEW_LIMIT;
+                    const previewText = hasLongText && !isExpanded
+                      ? `${note.text.slice(0, PATCHNOTE_PREVIEW_LIMIT).trimEnd()}...`
+                      : note.text;
+
+                    return (
+                      <article key={note.id} className="patchnote-card">
+                        <div className="patchnote-date">{formatPatchNoteDate(note.date)}</div>
+                        <h4>{note.title}</h4>
+                        <p>{previewText}</p>
+                        {hasLongText ? (
+                          <button
+                            type="button"
+                            className="ghost patchnote-toggle"
+                            onClick={() => togglePatchNoteExpanded(note.id)}
+                          >
+                            {isExpanded ? 'Свернуть' : 'Читать далее'}
+                          </button>
+                        ) : null}
+                      </article>
+                    );
+                  })}
+                </div>
+              ) : null}
+            </>
+          ) : null}
         </section>
 
-        <button type="button" className="tsd-home-btn" onClick={openTsd}>ТСД</button>
+        <div className="home-tools-row">
+          <button type="button" className="tsd-home-btn" onClick={openTsd}>ТСД</button>
+        </div>
 
         {settingsOpen ? (
           <div className="modal-backdrop" onClick={closeSettings}>
@@ -1972,6 +2431,12 @@ export default function App() {
               <button type="button" onClick={openBindModal}>
                 {candidateCodes.length > 1 ? 'Выбрать товар' : 'Привязать вручную'}
               </button>
+            </div>
+          ) : null}
+          {bindTargetBarcode && !unresolvedBarcode ? (
+            <div className="scanner-unresolved">
+              <span>Текущий штрихкод: {bindTargetBarcode}</span>
+              <button type="button" onClick={openBindModal}>Ручная привязка</button>
             </div>
           ) : null}
           {hiddenCompletedMatch && !unresolvedBarcode ? (
@@ -2085,22 +2550,13 @@ export default function App() {
       </nav>
 
       {activeFactCode ? (
-        <div ref={keypadRef} className="fact-keypad">
-          <div className="fact-keypad-grid">
-            <button type="button" onPointerDown={preventFactKeypadFocusLoss} onClick={() => appendToActiveFact('1')}>1</button>
-            <button type="button" onPointerDown={preventFactKeypadFocusLoss} onClick={() => appendToActiveFact('2')}>2</button>
-            <button type="button" onPointerDown={preventFactKeypadFocusLoss} onClick={() => appendToActiveFact('3')}>3</button>
-            <button type="button" onPointerDown={preventFactKeypadFocusLoss} onClick={() => appendToActiveFact('4')}>4</button>
-            <button type="button" onPointerDown={preventFactKeypadFocusLoss} onClick={() => appendToActiveFact('5')}>5</button>
-            <button type="button" onPointerDown={preventFactKeypadFocusLoss} onClick={() => appendToActiveFact('6')}>6</button>
-            <button type="button" onPointerDown={preventFactKeypadFocusLoss} onClick={() => appendToActiveFact('7')}>7</button>
-            <button type="button" onPointerDown={preventFactKeypadFocusLoss} onClick={() => appendToActiveFact('8')}>8</button>
-            <button type="button" onPointerDown={preventFactKeypadFocusLoss} onClick={() => appendToActiveFact('9')}>9</button>
-            <button type="button" onPointerDown={preventFactKeypadFocusLoss} onClick={() => appendToActiveFact('+')}>+</button>
-            <button type="button" onPointerDown={preventFactKeypadFocusLoss} onClick={() => appendToActiveFact('0')}>0</button>
-            <button type="button" onPointerDown={preventFactKeypadFocusLoss} onClick={eraseActiveFact}>⌫</button>
-          </div>
-        </div>
+        <FactKeypad
+          ref={keypadRef}
+          value={values[activeFactCode] || ''}
+          onAppend={appendToActiveFact}
+          onErase={eraseActiveFact}
+          onKeepOpen={keepFactKeypadOpen}
+        />
       ) : null}
 
       {mismatchModalOpen ? (
@@ -2215,7 +2671,7 @@ export default function App() {
       {bindModalOpen ? (
         <div className="modal-backdrop" onClick={closeBindModal}>
           <div className="modal-card" onClick={event => event.stopPropagation()}>
-            <h3>Привязать штрихкод {unresolvedBarcode}</h3>
+            <h3>Привязать штрихкод {bindTargetBarcode || unresolvedBarcode}</h3>
             {candidateItems.length ? (
               <>
                 <div className="line mini">Ранее встречались варианты:</div>
@@ -2225,7 +2681,7 @@ export default function App() {
                       key={`candidate-${item.code}`}
                       type="button"
                       className="bind-item-row"
-                      onClick={() => bindBarcodeToItem(item.code)}
+                      onClick={() => void bindBarcodeToSelectedItem(item.code)}
                     >
                       <span className="bind-item-code">{item.code}</span>
                       <span className="bind-item-name">{item.name}</span>
@@ -2247,7 +2703,7 @@ export default function App() {
                   key={item.code}
                   type="button"
                   className="bind-item-row"
-                  onClick={() => bindBarcodeToItem(item.code)}
+                  onClick={() => void bindBarcodeToSelectedItem(item.code)}
                 >
                   <span className="bind-item-code">{item.code}</span>
                   <span className="bind-item-name">{item.name}</span>

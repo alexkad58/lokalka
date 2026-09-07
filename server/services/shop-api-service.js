@@ -225,6 +225,55 @@ export function createShopApiService({
     persistCache();
   }
 
+  function findBarcodesForCode(code, excludedBarcode = '') {
+    const normalizedCode = String(code || '').trim();
+    const normalizedExcludedBarcode = String(excludedBarcode || '').trim();
+    if (!normalizedCode) return [];
+
+    return Array.from(cache.entries())
+      .filter(([barcode, record]) => barcode !== normalizedExcludedBarcode && (record?.codes || []).map(String).includes(normalizedCode))
+      .map(([barcode]) => barcode);
+  }
+
+  function reassignResolutionCode(barcode, code, source = 'manual', storeNumber = '') {
+    const normalizedBarcode = String(barcode || '').trim();
+    const normalizedCode = String(code || '').trim();
+    if (!normalizedBarcode || !normalizedCode) {
+      return { changed: false, barcode: normalizedBarcode, code: normalizedCode, previousBarcodes: [] };
+    }
+
+    const previousBarcodes = findBarcodesForCode(normalizedCode, normalizedBarcode);
+    const nextCache = new Map();
+
+    for (const [mappedBarcode, record] of cache.entries()) {
+      const codes = (record?.codes || []).map(String).filter(itemCode => itemCode !== normalizedCode);
+      if (codes.length) {
+        nextCache.set(mappedBarcode, {
+          ...record,
+          codes: Array.from(new Set(codes))
+        });
+      }
+    }
+
+    const current = cache.get(normalizedBarcode);
+    const currentCodes = (current?.codes || []).map(String).filter(itemCode => itemCode !== normalizedCode);
+    nextCache.set(normalizedBarcode, {
+      ...(current || {}),
+      codes: Array.from(new Set([...currentCodes, normalizedCode])),
+      source,
+      storeNumber: String(storeNumber || current?.storeNumber || '').trim(),
+      updatedAt: Date.now()
+    });
+
+    cache.clear();
+    for (const [mappedBarcode, record] of nextCache.entries()) {
+      cache.set(mappedBarcode, record);
+    }
+    persistCache();
+
+    return { changed: true, barcode: normalizedBarcode, code: normalizedCode, previousBarcodes };
+  }
+
   function buildRecountCache(items) {
     const itemByCode = {};
     const barcodeToCodes = {};
@@ -239,6 +288,8 @@ export function createShopApiService({
   return {
     resolveBarcodeFromShopApi,
     addResolutionCode,
+    findBarcodesForCode,
+    reassignResolutionCode,
     buildRecountCache,
     cache,
     buildShopBarcodeUrl: (barcode, storeNumber = '') => buildShopBarcodeUrl(shopApi, barcode, storeNumber),

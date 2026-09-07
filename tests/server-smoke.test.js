@@ -186,6 +186,107 @@ test('admin token settings never return the full token', async () => {
   assert.equal(responseJson(readResponse).token, undefined);
 });
 
+test('patch notes support authorized read and admin CRUD with validation', async () => {
+  const unauthorizedRead = await app.inject({ method: 'GET', url: '/api/patchnotes' });
+  assert.equal(unauthorizedRead.statusCode, 401);
+
+  const userReadEmpty = await app.inject({
+    method: 'GET',
+    url: '/api/patchnotes',
+    headers: authHeaders(userToken, 'device-a')
+  });
+  assert.equal(userReadEmpty.statusCode, 200);
+  assert.deepEqual(responseJson(userReadEmpty).items, []);
+
+  const userAdminDenied = await app.inject({
+    method: 'GET',
+    url: '/api/admin/patchnotes',
+    headers: authHeaders(userToken, 'device-a')
+  });
+  assert.equal(userAdminDenied.statusCode, 403);
+
+  const invalidCreate = await jsonRequest(
+    'POST',
+    '/api/admin/patchnotes',
+    { date: '', title: '', text: '' },
+    authHeaders(adminToken, 'admin-device')
+  );
+  assert.equal(invalidCreate.statusCode, 400);
+
+  const createOne = await jsonRequest(
+    'POST',
+    '/api/admin/patchnotes',
+    { date: '2026-09-08', title: 'Alpha', text: 'First release note' },
+    authHeaders(adminToken, 'admin-device')
+  );
+  assert.equal(createOne.statusCode, 200);
+  const noteOne = responseJson(createOne).item;
+  assert.ok(noteOne.id);
+
+  const createTwo = await jsonRequest(
+    'POST',
+    '/api/admin/patchnotes',
+    { date: '2026-09-09', title: 'Beta', text: 'Second release note' },
+    authHeaders(adminToken, 'admin-device')
+  );
+  assert.equal(createTwo.statusCode, 200);
+  const noteTwo = responseJson(createTwo).item;
+
+  const adminList = await app.inject({
+    method: 'GET',
+    url: '/api/admin/patchnotes',
+    headers: authHeaders(adminToken, 'admin-device')
+  });
+  assert.equal(adminList.statusCode, 200);
+  assert.deepEqual(responseJson(adminList).items.map(item => item.id), [noteTwo.id, noteOne.id]);
+
+  const updateOne = await jsonRequest(
+    'PUT',
+    `/api/admin/patchnotes/${encodeURIComponent(noteOne.id)}`,
+    { date: '2026-09-10', title: 'Alpha updated', text: 'Updated release note text' },
+    authHeaders(adminToken, 'admin-device')
+  );
+  assert.equal(updateOne.statusCode, 200);
+  assert.equal(responseJson(updateOne).item.title, 'Alpha updated');
+
+  const userReadFilled = await app.inject({
+    method: 'GET',
+    url: '/api/patchnotes',
+    headers: authHeaders(userToken, 'device-a')
+  });
+  assert.equal(userReadFilled.statusCode, 200);
+  assert.deepEqual(responseJson(userReadFilled).items.map(item => item.title), ['Alpha updated', 'Beta']);
+
+  const deleteMissing = await app.inject({
+    method: 'DELETE',
+    url: '/api/admin/patchnotes/missing-id',
+    headers: authHeaders(adminToken, 'admin-device')
+  });
+  assert.equal(deleteMissing.statusCode, 404);
+
+  const deleteTwo = await app.inject({
+    method: 'DELETE',
+    url: `/api/admin/patchnotes/${encodeURIComponent(noteTwo.id)}`,
+    headers: authHeaders(adminToken, 'admin-device')
+  });
+  assert.equal(deleteTwo.statusCode, 200);
+
+  const deleteOne = await app.inject({
+    method: 'DELETE',
+    url: `/api/admin/patchnotes/${encodeURIComponent(noteOne.id)}`,
+    headers: authHeaders(adminToken, 'admin-device')
+  });
+  assert.equal(deleteOne.statusCode, 200);
+
+  const userReadAfterDelete = await app.inject({
+    method: 'GET',
+    url: '/api/patchnotes',
+    headers: authHeaders(userToken, 'device-a')
+  });
+  assert.equal(userReadAfterDelete.statusCode, 200);
+  assert.deepEqual(responseJson(userReadAfterDelete).items, []);
+});
+
 test('service and validation errors keep their status codes', async () => {
   const inactiveResponse = await app.inject({
     method: 'GET',
