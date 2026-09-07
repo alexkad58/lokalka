@@ -43,6 +43,7 @@ export const config = {
   sessionTtlMs: sessionTtlDays * 24 * 60 * 60 * 1000,
   dataFileUrl: resolveFileUrl('LOKALKA_DATA_FILE', 'storage.json'),
   barcodeCacheFileUrl: resolveFileUrl('LOKALKA_BARCODE_CACHE_FILE', 'barcode-cache.json'),
+  patchNotesFileUrl: resolveFileUrl('LOKALKA_PATCHNOTES_FILE', 'patchnotes.json'),
   shopApi: {
     url: readString('SHOP_API_URL'),
     method: readString('SHOP_API_METHOD', 'GET').toUpperCase(),

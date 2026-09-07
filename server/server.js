@@ -7,8 +7,10 @@ import { randomBytes } from 'node:crypto';
 import PDFDocument from 'pdfkit';
 import { config } from './config/env.js';
 import { createBarcodeCacheStore } from './db/barcode-cache-store.js';
+import { createPatchNotesStore } from './db/patchnotes-store.js';
 import { createJsonStore } from './db/json-store.js';
 import { createAuditLogService } from './services/audit-log-service.js';
+import { createPatchNotesService } from './services/patchnotes-service.js';
 import { createUsersService } from './services/users-service.js';
 import { createRecountService } from './services/recount-service.js';
 import { createShopApiService } from './services/shop-api-service.js';
@@ -21,6 +23,7 @@ import { createAuthRoutes } from './routes/auth.js';
 import { createAccountRoutes } from './routes/account.js';
 import { createAdminRoutes } from './routes/admin.js';
 import { createBarcodeRoutes } from './routes/barcode.js';
+import { createPatchNotesRoutes } from './routes/patchnotes.js';
 import { createRecountRoutes } from './routes/recounts.js';
 import { hashPassword, verifyPassword } from './auth/password.js';
 import { createSessionManager } from './auth/sessions.js';
@@ -54,6 +57,7 @@ const {
   sessionTtlMs: SESSION_TTL_MS,
   dataFileUrl: DATA_FILE_URL,
   barcodeCacheFileUrl: BARCODE_CACHE_FILE_URL,
+  patchNotesFileUrl: PATCH_NOTES_FILE_URL,
   port: SERVER_PORT,
   shopApi: {
     url: SHOP_API_URL,
@@ -70,6 +74,7 @@ const {
   }
 } = config;
 const barcodeResolutionCache = new Map();
+const patchNotesState = { items: [] };
 
 const db = {
   users: [],
@@ -142,6 +147,24 @@ const barcodeCacheStore = createBarcodeCacheStore({
   cache: barcodeResolutionCache,
   onError: error => logEvent('error', 'barcode-cache-save-failed', { message: error?.message || String(error) })
 });
+
+function normalizePatchNoteRecord(note) {
+  const dateRaw = String(note?.date || '').trim();
+  const parsedDate = new Date(dateRaw);
+  const date = Number.isNaN(parsedDate.getTime()) ? '' : parsedDate.toISOString().slice(0, 10);
+  const title = String(note?.title || '').trim().slice(0, 160);
+  const text = String(note?.text || '').trim().slice(0, 12000);
+  const id = String(note?.id || createId('pn')).trim();
+  const createdAt = String(note?.createdAt || toIsoNow());
+  const updatedAt = String(note?.updatedAt || toIsoNow());
+  if (!id || !date || !title || !text) return null;
+  return { id, date, title, text, createdAt, updatedAt };
+}
+
+const patchNotesStore = createPatchNotesStore({
+  fileUrl: PATCH_NOTES_FILE_URL,
+  normalizePatchNote: normalizePatchNoteRecord
+});
 const tokenState = {
   accessToken: SHOP_API_ACCESS_TOKEN,
   refreshToken: SHOP_API_REFRESH_TOKEN,
@@ -163,6 +186,13 @@ const shopApiService = createShopApiService({
   persistCache: () => barcodeCacheStore.persist(),
   logEvent,
   logShopStdout
+});
+
+const patchNotesService = createPatchNotesService({
+  state: patchNotesState,
+  savePatchNotes: items => patchNotesStore.save(items),
+  createId,
+  toIsoNow
 });
 
 const tsdBotService = createTsdBotService({
@@ -191,6 +221,9 @@ const loadDb = () => databaseStore.load(db);
 const saveDb = () => databaseStore.save(db);
 const loadBarcodeResolutionCache = () => barcodeCacheStore.load();
 const persistBarcodeResolutionCache = () => barcodeCacheStore.persist();
+const loadPatchNotes = async () => {
+  patchNotesState.items = await patchNotesStore.load();
+};
 
 let sessionManager;
 const hydrateSessionsFromDb = () => sessionManager.hydrateFromDb();
@@ -357,7 +390,7 @@ async function readPdfBuffer(file) {
 
 app.register(cors, {
   origin: true,
-  methods: ['GET', 'POST', 'DELETE', 'OPTIONS']
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS']
 });
 
 app.register(multipart, {
@@ -416,6 +449,13 @@ app.register(createBarcodeRoutes({
   logShopStdout,
   buildRequestLogMeta
 }));
+app.register(createPatchNotesRoutes({
+  authenticate,
+  requireAdmin,
+  patchNotesService,
+  logEvent,
+  buildRequestLogMeta
+}));
 app.register(createRecountRoutes({
   authenticate,
   requireServiceAccess,
@@ -438,6 +478,7 @@ app.register(createRecountRoutes({
 export async function initializeServer() {
   await loadDb();
   await loadBarcodeResolutionCache();
+  await loadPatchNotes();
   logShopApiStartupConfig();
 }
 

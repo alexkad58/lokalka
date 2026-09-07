@@ -99,6 +99,46 @@ export async function getAdminShopApiSettings() {
   return readJsonOrThrow(response, 'Не удалось загрузить настройки API магазина');
 }
 
+export async function getPatchNotes() {
+  const response = await fetch('/api/patchnotes', {
+    headers: authHeaders()
+  });
+  return readJsonOrThrow(response, 'Не удалось загрузить патчноуты');
+}
+
+export async function getAdminPatchNotes() {
+  const response = await fetch('/api/admin/patchnotes', {
+    headers: authHeaders()
+  });
+  return readJsonOrThrow(response, 'Не удалось загрузить патчноуты для админки');
+}
+
+export async function createAdminPatchNote(payload) {
+  const response = await fetch('/api/admin/patchnotes', {
+    method: 'POST',
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify(payload || {})
+  });
+  return readJsonOrThrow(response, 'Не удалось создать патчноут');
+}
+
+export async function updateAdminPatchNote(id, payload) {
+  const response = await fetch(`/api/admin/patchnotes/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify(payload || {})
+  });
+  return readJsonOrThrow(response, 'Не удалось обновить патчноут');
+}
+
+export async function deleteAdminPatchNote(id) {
+  const response = await fetch(`/api/admin/patchnotes/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+    headers: authHeaders()
+  });
+  return readJsonOrThrow(response, 'Не удалось удалить патчноут');
+}
+
 export async function updateAdminShopApiToken(token) {
   const response = await fetch('/api/admin/shop-api', {
     method: 'POST',
@@ -234,6 +274,22 @@ export async function resolveBarcode(barcode, itemCodes = [], recountId = '') {
   });
 
   return readJsonOrThrow(response, 'Не удалось обработать штрихкод');
+}
+
+export async function bindBarcodeToItem(payload) {
+  const response = await fetch('/api/recount/bind-barcode', {
+    method: 'POST',
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify(payload || {})
+  });
+
+  const data = await response.json().catch(() => ({}));
+  if (response.ok && data?.ok !== false) return data;
+
+  const error = new Error(data.error || 'Не удалось привязать штрихкод');
+  error.status = response.status;
+  error.payload = data;
+  throw error;
 }
 
 export async function finishRecountWithoutPdf(id, payload) {

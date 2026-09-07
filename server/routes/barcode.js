@@ -11,6 +11,58 @@ export function createBarcodeRoutes({
   buildRequestLogMeta
 }) {
   return async function barcodeRoutes(app) {
+    app.post('/api/recount/bind-barcode', { preHandler: [authenticate, requireServiceAccess] }, async (request, reply) => {
+      const body = request.body && typeof request.body === 'object' ? request.body : {};
+      const barcode = String(body.barcode || '').trim();
+      const itemCode = String(body.itemCode || body.code || '').trim();
+      const recount = body.recountId
+        ? db.recounts.find(item => item.id === String(body.recountId) && item.userId === request.user.id)
+        : null;
+      const storeNumber = String(recount?.storeNumber || shopIdFallback || '').trim();
+
+      if (!barcode || !itemCode) {
+        return reply.code(400).send({ ok: false, error: 'barcode and itemCode are required' });
+      }
+      if (!recount) {
+        return reply.code(404).send({ ok: false, error: 'Просчет не найден' });
+      }
+      if (!recount.items.some(item => String(item.code) === itemCode)) {
+        return reply.code(400).send({ ok: false, error: 'Код товара отсутствует в просчете' });
+      }
+
+      const existingBarcodes = shopApiService.findBarcodesForCode(itemCode, barcode);
+      if (existingBarcodes.length && body.confirm !== true) {
+        logEvent('info', 'bind-barcode-conflict', buildRequestLogMeta(request, {
+          barcode,
+          itemCode,
+          existingBarcodes
+        }));
+        return reply.code(409).send({
+          ok: false,
+          conflict: true,
+          barcode,
+          itemCode,
+          existingBarcodes,
+          error: `Код товара уже привязан к штрихкоду ${existingBarcodes.join(', ')}`
+        });
+      }
+
+      const result = shopApiService.reassignResolutionCode(barcode, itemCode, 'manual', storeNumber);
+      logEvent('info', 'bind-barcode-success', buildRequestLogMeta(request, {
+        barcode,
+        itemCode,
+        previousBarcodes: result.previousBarcodes,
+        confirmed: body.confirm === true
+      }));
+      return {
+        ok: true,
+        conflict: false,
+        barcode,
+        itemCode,
+        previousBarcodes: result.previousBarcodes
+      };
+    });
+
     app.post('/api/recount/resolve-barcode', { preHandler: [authenticate, requireServiceAccess] }, async (request, reply) => {
       const body = request.body && typeof request.body === 'object' ? request.body : {};
       const barcode = String(body.barcode || '').trim();
