@@ -9,8 +9,9 @@
     "dev:client": "npm run dev --prefix client",
     "start": "npm run start --prefix server",
     "build": "npm run build --prefix client",
+    "smoke:health": "node scripts/health-smoke.mjs",
     "generate:sample": "node index.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node --test tests/**/*.test.js"
   },
   "author": "alexkad58",
   "license": "ISC",

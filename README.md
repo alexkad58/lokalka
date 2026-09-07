@@ -13,21 +13,29 @@ npm run dev
 
 ## Структура
 
-- `server/` - Fastify API для загрузки и парсинга PDF.
+- `server/` - Fastify API. Bootstrap находится в `server/server.js`, а routes, auth, storage, PDF и services разделены по модулям.
+- `server/routes/` - HTTP-маршруты без запуска/конфигурации сервера.
+- `server/services/` - бизнес-логика просчетов, audit logs, Shop API и TSD lifecycle.
+- `server/auth/` - пароли, сессии и middleware доступа.
+- `server/db/` - JSON storage и barcode cache.
+- `server/pdf/` - подготовка PDF-таблиц и rendering helpers.
+- `server/utils/` - чистые функции дат, чисел, request и logging metadata.
 - `client/` - React UI для загрузки файла и работы с объектом пересчёта.
 - `tsd/` - Telegram-бот для помощи с ТСД.
+
+Автоматические проверки находятся в `tests/`. Команда `npm test` запускает unit- и HTTP smoke-тесты через Fastify `app.inject()` без открытия порта и запуска TSD-бота.
 
 ## TSD бот вместе с backend
 
 Бот из `tsd/` запускается автоматически при старте backend (`npm run dev --prefix server` и `npm run start --prefix server`).
 
-Обязательные переменные в `server/.env`:
+Для запуска бота нужна одна из переменных в `server/.env`:
 
-- `TG_TOKEN` - токен Telegram бота.
+- `TG_TOKEN` или `TOKEN` - токен Telegram бота.
 
 Опциональные:
 
-- `TSD_BOT_ENABLED=1` - включить/выключить автозапуск бота (`0` выключает).
+- `TSD_BOT_ENABLED=1` - включить/выключить автозапуск бота (`0` выключает; по умолчанию включен).
 - `TSD_PROXY=http://login:password@host:port` - единая переменная прокси для бота.
 
 При указании `TSD_PROXY` она автоматически применяется ко всем исходящим запросам бота.
@@ -35,14 +43,43 @@ npm run dev
 ## Основной API
 
 - `GET /health` - проверка доступности сервера.
-- `POST /api/recount/parse-pdf` - загрузка PDF и возврат объекта пересчёта.
+- `POST /api/recount/parse-pdf` - разобрать PDF без создания активного просчета.
+- `POST /api/recounts/from-pdf` - создать активный просчет из PDF.
+- `GET /api/recounts` - получить активный и завершенные просчеты.
+- `POST /api/recount/resolve-barcode` - найти артикул по штрихкоду.
 
-## Что ещё может пригодиться
+## Переменные окружения
 
-- `GET /api/recount/:docId` - получить сохранённый объект пересчёта по id.
-- `POST /api/recount/:docId/values` - сохранить значения факта/счётчика.
-- `POST /api/recount/export` - собрать итоговый JSON или PDF на сервере.
-- `GET /api/recount/templates` - если позже появятся разные шаблоны PDF.
+Основные настройки читаются из `server/.env`:
+
+- `PORT`, `ADMIN_LOGIN`, `ADMIN_PASSWORD`, `SESSION_TTL_DAYS`;
+- `SHOP_API_URL`, `SHOP_API_METHOD`, `SHOP_API_TOKEN`;
+- `SHOP_API_TOKEN_HEADER`, `SHOP_API_REFRESH_HEADER`, `SHOP_API_TOKEN_PREFIX`;
+- `SHOP_API_CITY_ID`, `SHOP_API_SHOP_ID`, `SHOP_API_USER_AGENT`, `SHOP_API_STDOUT_LOGS`;
+- `TG_TOKEN` или `TOKEN`, `TSD_BOT_ENABLED`, `TSD_PROXY`;
+- `LOKALKA_DATA_FILE`, `LOKALKA_BARCODE_CACHE_FILE` для нестандартных путей storage.
+
+Секреты и runtime-файлы `server/.env`, `storage.json` и `barcode-cache.json` исключены из Git.
+
+## Проверки и smoke
+
+```bash
+npm test
+npm run build
+```
+
+При запущенном backend можно проверить endpoint:
+
+```bash
+npm run smoke:health
+```
+
+Для другого адреса:
+
+```powershell
+$env:LOKALKA_HEALTH_URL="http://127.0.0.1:3000"
+npm run smoke:health
+```
 
 ## Деплой на прод
 
