@@ -99,6 +99,22 @@ export async function getAdminShopApiSettings() {
   return readJsonOrThrow(response, 'Не удалось загрузить настройки API магазина');
 }
 
+export async function getAdminContactLinks() {
+  const response = await fetch('/api/admin/contact-links', {
+    headers: authHeaders()
+  });
+  return readJsonOrThrow(response, 'Не удалось загрузить ссылки для связи');
+}
+
+export async function updateAdminContactLinks(payload = {}) {
+  const response = await fetch('/api/admin/contact-links', {
+    method: 'POST',
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify(payload || {})
+  });
+  return readJsonOrThrow(response, 'Не удалось сохранить ссылки для связи');
+}
+
 export async function getPatchNotes() {
   const response = await fetch('/api/patchnotes', {
     headers: authHeaders()

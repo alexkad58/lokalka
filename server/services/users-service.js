@@ -9,6 +9,32 @@ export function createUsersService({
   toIsoNow,
   formatRuDate
 }) {
+  const defaultSupportLinks = {
+    telegramUrl: 'https://t.me/alekseikb58',
+    maxUrl: 'https://www.max.ru/'
+  };
+
+  function normalizeSupportLink(value, fallback) {
+    const raw = String(value || '').trim();
+    if (!raw) return fallback;
+
+    if (/^https?:\/\//i.test(raw)) return raw;
+    if (raw.startsWith('@')) return `https://t.me/${raw.slice(1)}`;
+    if (raw.startsWith('t.me/')) return `https://${raw}`;
+    if (raw.startsWith('https://t.me/')) return raw;
+    if (raw.startsWith('http://t.me/')) return raw.replace(/^http:\/\//i, 'https://');
+
+    return fallback;
+  }
+
+  function getSupportLinks() {
+    const stored = db.settings?.contactLinks && typeof db.settings.contactLinks === 'object' ? db.settings.contactLinks : {};
+    return {
+      telegramUrl: normalizeSupportLink(stored.telegramUrl, defaultSupportLinks.telegramUrl),
+      maxUrl: normalizeSupportLink(stored.maxUrl, defaultSupportLinks.maxUrl)
+    };
+  }
+
   function ensureAdminUser() {
     const existing = db.users.find(user => normalizeLogin(user.login) === adminLogin);
     if (existing) {
@@ -78,7 +104,8 @@ export function createUsersService({
       subscriptionActive: hasActiveSubscription(user),
       deviceBound: Boolean(user.deviceId),
       deviceBindingDisabled: Boolean(user.deviceBindingDisabled),
-      defaultCounterName: user.defaultCounterName || ''
+      defaultCounterName: user.defaultCounterName || '',
+      supportLinks: getSupportLinks()
     };
   }
 
@@ -86,6 +113,7 @@ export function createUsersService({
     ensureAdminUser,
     hasActiveSubscription,
     buildSubscriptionStatus,
-    publicUser
+    publicUser,
+    getSupportLinks
   };
 }

@@ -1,10 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import QRCode from 'qrcode';
 import bwipjs from 'bwip-js';
 import {
   normalizeScannedCode,
-  sanitizeFactExpression as sanitizeFactExpressionUtil,
-  sumFactExpression as sumFactExpressionUtil
+  sanitizeFactExpression,
+  sumFactExpression
 } from '../../shared/recount-utils.js';
 import { markCompletionSurveyPending, track } from './analytics';
 import {
@@ -17,6 +17,7 @@ import {
   deleteAdminUser,
   deleteRecount,
   finishRecountWithoutPdf,
+  getAdminContactLinks,
   getAdminLogs,
   getAdminPatchNotes,
   getAdminShopApiSettings,
@@ -27,288 +28,92 @@ import {
   login,
   logout,
   me,
-  reopenRecount,
   register,
+  reopenRecount,
   resetUserDeviceBinding,
   resolveBarcode,
   saveRecountProgress,
   setAuthToken,
   setUserDeviceBindingDisabled,
-  updateAdminPatchNote,
   updateAccountSettings,
+  updateAdminContactLinks,
+  updateAdminPatchNote,
   updateAdminShopApiToken
 } from './api';
-import FactKeypad from './components/FactKeypad';
-import KeypadSandboxPage from './KeypadSandboxPage';
+
+import {
+  FEEDBACK_SOUND_STORAGE_KEY,
+  triggerHaptic
+} from './utils/audio.js';
+import {
+  loadBarcodeCache,
+  normalizeBarcodeValue,
+  reassignBarcodeToItem,
+  saveBarcodeCache
+} from './utils/barcode.js';
+import {
+  formatStartDate,
+  getUserDaysRemaining,
+  safeNumber
+} from './utils/formatting.js';
+import {
+  normalizePatchNote,
+  sortPatchNotes
+} from './utils/patchnotes.js';
+import { matchesSearchQuery } from './utils/search.js';
+import {
+  formatTsdDate,
+  normalizeTsdPrice,
+  parseTsdQr
+} from './utils/tsd.js';
+
+import { useBarcodeScanner } from './hooks/useBarcodeScanner.js';
+
+import AuthPage from './components/auth/AuthPage.jsx';
+import SubscriptionExpiredPage from './components/auth/SubscriptionExpiredPage.jsx';
+import AdminPage from './components/admin/AdminPage.jsx';
+import TsdPage from './components/tsd/TsdPage.jsx';
+import HomePage from './components/home/HomePage.jsx';
+import RecountPage from './components/recount/RecountPage.jsx';
+import KeypadSandboxPage from './KeypadSandboxPage.jsx';
 
 const TOKEN_KEY = 'lokalka_auth_token';
-const BARCODE_CACHE_STORAGE_KEY = 'barcode_article_cache_v1';
-const FEEDBACK_SOUND_STORAGE_KEY = 'lokalka_feedback_sound_enabled';
 const AUTOSAVE_INTERVAL_MS = 8000;
-const ADMIN_LOG_LEVEL_TABS = [
-  { key: 'all', label: 'Все' },
-  { key: 'error', label: 'Ошибки' },
-  { key: 'warn', label: 'Предупр.' },
-  { key: 'info', label: 'Инфо' },
-  { key: 'debug', label: 'Debug' },
-  { key: 'trace', label: 'Trace' }
-];
-const PATCHNOTE_PREVIEW_LIMIT = 220;
-
-function normalizeQuery(value) {
-  return String(value || '')
-    .toLowerCase()
-    .replace(/ё/g, 'е')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function normalizeSearchText(value) {
-  return String(value || '')
-    .toLowerCase()
-    .replace(/ё/g, 'е')
-    .replace(/ж\s*\/\s*б/g, 'жб')
-    .replace(/№/g, ' ')
-    .replace(/[^a-zа-я0-9]+/gi, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function tokenizeSearch(value) {
-  const normalized = normalizeSearchText(value);
-  return normalized ? normalized.split(' ') : [];
-}
-
-function matchesSearchQuery(query, ...candidates) {
-  const tokens = tokenizeSearch(query);
-  if (!tokens.length) return true;
-
-  const haystacks = candidates
-    .map(candidate => normalizeSearchText(candidate))
-    .filter(Boolean);
-
-  if (!haystacks.length) return false;
-
-  return tokens.every(token => haystacks.some(text => text.includes(token)));
-}
-
-function detectPackageType(productName) {
-  const normalizedName = normalizeQuery(productName);
-  if (normalizedName.includes('ж/б')) return 'can';
-  if (normalizedName.includes('ст')) return 'glass';
-  return 'pet';
-}
-
-function getPackageTypeLabel(packageType) {
-  if (packageType === 'can') return 'Железная банка';
-  if (packageType === 'glass') return 'Стеклянная бутылка';
-  return 'ПЭТ бутылка';
-}
-
-function formatSubscriptionStatusLabel(account) {
-  if (account?.isAdmin) return 'Администратор';
-  if (!account?.subscriptionActive || !account?.subscriptionUntil) return 'Неактивный';
-  const until = new Date(account.subscriptionUntil);
-  if (Number.isNaN(until.getTime())) return 'Неактивный';
-  return `Активный до ${until.toLocaleDateString('ru-RU')}`;
-}
-
-function formatRub(value) {
-  const amount = Number(value);
-  if (!Number.isFinite(amount)) return '0.00 руб.';
-  return `${amount.toFixed(2)} руб.`;
-}
-
-function formatStartDate(value) {
-  const date = new Date(value || '');
-  if (Number.isNaN(date.getTime())) return '-';
-  return date.toLocaleDateString('ru-RU');
-}
-
-function formatLogDateTime(value) {
-  const date = new Date(value || '');
-  if (Number.isNaN(date.getTime())) return '-';
-  return date.toLocaleString('ru-RU');
-}
-
-function formatLogLevel(level) {
-  const normalized = String(level || '').toLowerCase();
-  if (normalized === 'error') return 'ERROR';
-  if (normalized === 'warn') return 'WARN';
-  if (normalized === 'debug') return 'DEBUG';
-  if (normalized === 'trace') return 'TRACE';
-  if (normalized === 'fatal') return 'FATAL';
-  return 'INFO';
-}
-
-function safeNumber(value) {
-  const parsed = Number.parseFloat(String(value).replace(',', '.'));
-  return Number.isFinite(parsed) ? parsed : 0;
-}
-
-function sanitizeFactExpression(value) {
-  return sanitizeFactExpressionUtil(value);
-}
-
-function sumFactExpression(value) {
-  return sumFactExpressionUtil(value);
-}
-
-function supportsBarcodeDetector() {
-  return typeof window !== 'undefined' && 'BarcodeDetector' in window;
-}
-
-let feedbackAudioContext = null;
-
-function unlockFeedbackAudio() {
-  if (typeof window === 'undefined' || localStorage.getItem(FEEDBACK_SOUND_STORAGE_KEY) === '0') return;
-
-  try {
-    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-    if (!AudioContextClass) return;
-    if (!feedbackAudioContext) feedbackAudioContext = new AudioContextClass();
-    if (feedbackAudioContext.state === 'suspended') void feedbackAudioContext.resume();
-  } catch {
-    // Audio feedback is optional.
-  }
-}
-
-function playFeedbackSound(kind = 'scan') {
-  if (typeof window === 'undefined') return;
-
-  try {
-    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-    if (!AudioContextClass) return;
-
-    if (!feedbackAudioContext) feedbackAudioContext = new AudioContextClass();
-    const context = feedbackAudioContext;
-    const playTone = () => {
-      const oscillator = context.createOscillator();
-      const gain = context.createGain();
-      const startTime = context.currentTime;
-
-      const isScan = kind === 'scan';
-      oscillator.type = isScan ? 'sine' : 'triangle';
-      oscillator.frequency.setValueAtTime(isScan ? 1320 : 190, startTime);
-      gain.gain.setValueAtTime(isScan ? 0.04 : 0.06, startTime);
-      gain.gain.exponentialRampToValueAtTime(0.001, startTime + (isScan ? 0.06 : 0.035));
-      oscillator.connect(gain);
-      gain.connect(context.destination);
-      oscillator.start(startTime);
-      oscillator.stop(startTime + (isScan ? 0.065 : 0.04));
-    };
-
-    if (context.state === 'suspended') {
-      void context.resume().then(playTone);
-    } else {
-      playTone();
-    }
-  } catch {
-    // Audio feedback is optional.
-  }
-}
-
-function triggerHaptic(duration = 50, soundKind = 'scan') {
-  let vibrated = false;
-
-  if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
-    try {
-      vibrated = navigator.vibrate(duration) === true;
-    } catch {
-      vibrated = false;
-    }
-  }
-
-  if (localStorage.getItem(FEEDBACK_SOUND_STORAGE_KEY) !== '0') {
-    playFeedbackSound(soundKind);
-  }
-  return vibrated;
-}
-
-function normalizeBarcodeValue(value) {
-  return String(value || '').trim();
-}
-
-function normalizePatchNote(note) {
-  return {
-    id: String(note?.id || ''),
-    date: String(note?.date || '').trim(),
-    title: String(note?.title || '').trim(),
-    text: String(note?.text || '').trim()
-  };
-}
-
-function sortPatchNotes(items) {
-  const source = Array.isArray(items) ? items : [];
-  return source
-    .map(normalizePatchNote)
-    .filter(item => item.id && item.title && item.text)
-    .sort((a, b) => {
-      const tsA = Date.parse(a.date || '');
-      const tsB = Date.parse(b.date || '');
-      if (Number.isNaN(tsA) && Number.isNaN(tsB)) return 0;
-      if (Number.isNaN(tsA)) return 1;
-      if (Number.isNaN(tsB)) return -1;
-      return tsB - tsA;
-    });
-}
-
-function formatPatchNoteDate(value) {
-  const parsed = new Date(value || '');
-  if (Number.isNaN(parsed.getTime())) return value || 'Без даты';
-  return parsed.toLocaleDateString('ru-RU');
-}
-
-function formatTsdDate(dateValue = new Date()) {
-  const date = dateValue instanceof Date ? dateValue : new Date(dateValue);
-  return date.toLocaleDateString('ru-RU', {
-    day: '2-digit',
-    month: '2-digit',
-    year: '2-digit'
-  });
-}
-
-function normalizeTsdPrice(value) {
-  const normalized = String(value || '').trim().replace(',', '.');
-  if (!/^\d+(?:\.\d{1,2})?$/.test(normalized)) return '';
-  return Number(normalized).toFixed(2);
-}
-
-function parseTsdQr(value) {
-  const parts = String(value || '').trim().split(';');
-  if (parts[0] !== 'CEN' || parts.length < 6) return null;
-
-  const price = normalizeTsdPrice(parts[2]);
-  if (!parts[1] || !price || !parts[5]) return null;
-
-  return {
-    raw: String(value).trim(),
-    barcode: parts[1],
-    price,
-    date: parts[5]
-  };
-}
-
-function loadBarcodeCache() {
-  try {
-    const raw = localStorage.getItem(BARCODE_CACHE_STORAGE_KEY);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === 'object' ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-
-function saveBarcodeCache(cache) {
-  localStorage.setItem(BARCODE_CACHE_STORAGE_KEY, JSON.stringify(cache || {}));
-}
 
 function buildProgressPayload(values, search, barcodeCache) {
   return {
     values,
     search,
     barcodeCache
+  };
+}
+
+function valueMapForProgress(items, valueMap) {
+  const source = items && Array.isArray(items) ? items : [];
+  const result = {};
+  for (const item of source) {
+    result[item.code] = valueMap?.[item.code] ?? '';
+  }
+  return result;
+}
+
+function computeRowState(item, valueMap) {
+  const raw = sanitizeFactExpression(valueMap[item.code] ?? '');
+  const manualFact = sumFactExpression(raw);
+  const hasManual = raw.length > 0 && manualFact !== null;
+  const docQty = safeNumber(item.docQty);
+  const fact = hasManual ? manualFact : null;
+  const delta = fact === null ? null : fact - docQty;
+  const status = delta === null ? '' : delta === 0 ? 'match' : delta < 0 ? 'missing' : 'excess';
+  const factDisplay = hasManual ? raw : '';
+
+  return {
+    raw,
+    docQty,
+    fact,
+    factDisplay,
+    delta,
+    status
   };
 }
 
@@ -329,12 +134,19 @@ export default function App() {
   const [patchNotesLoading, setPatchNotesLoading] = useState(false);
   const [patchNotesError, setPatchNotesError] = useState('');
   const [expandedPatchNotes, setExpandedPatchNotes] = useState({});
+
   const [adminUsers, setAdminUsers] = useState([]);
   const [adminTab, setAdminTab] = useState('users');
+  const [adminUserSearch, setAdminUserSearch] = useState('');
+  const [adminUserFilter, setAdminUserFilter] = useState('all');
   const [adminLogLevel, setAdminLogLevel] = useState('all');
+  const [adminLogSearch, setAdminLogSearch] = useState('');
+  const [adminLogVisibleLimit, setAdminLogVisibleLimit] = useState(50);
   const [adminLogEntries, setAdminLogEntries] = useState([]);
   const [adminLogCounts, setAdminLogCounts] = useState({});
   const [adminLogLoading, setAdminLogLoading] = useState(false);
+  const [adminContactLinks, setAdminContactLinks] = useState({ telegramUrl: '', maxUrl: '' });
+  const [adminContactLinksSaving, setAdminContactLinksSaving] = useState(false);
   const [shopApiTokenInput, setShopApiTokenInput] = useState('');
   const [shopApiTokenStatus, setShopApiTokenStatus] = useState(null);
   const [shopApiTokenSaving, setShopApiTokenSaving] = useState(false);
@@ -350,6 +162,9 @@ export default function App() {
   const [newPatchNoteDate, setNewPatchNoteDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [newPatchNoteTitle, setNewPatchNoteTitle] = useState('');
   const [newPatchNoteText, setNewPatchNoteText] = useState('');
+  const [adminNewPatchNoteOpen, setAdminNewPatchNoteOpen] = useState(false);
+  const [adminSuccess, setAdminSuccess] = useState('');
+  const [copiedLogId, setCopiedLogId] = useState('');
 
   const [activeRecount, setActiveRecount] = useState(null);
   const [values, setValues] = useState({});
@@ -360,11 +175,7 @@ export default function App() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [hideCompletedItems, setHideCompletedItems] = useState(false);
   const [mismatchFilter, setMismatchFilter] = useState('all');
-  const [scannerOn, setScannerOn] = useState(false);
-  const [scannerStatus, setScannerStatus] = useState('Сканер выключен');
-  const [lastCode, setLastCode] = useState('');
-  const [torchOn, setTorchOn] = useState(false);
-  const [scanSuccessFlash, setScanSuccessFlash] = useState(false);
+
   const [barcodeCache, setBarcodeCache] = useState(() => loadBarcodeCache());
 
   const [mismatchModalOpen, setMismatchModalOpen] = useState(false);
@@ -399,22 +210,103 @@ export default function App() {
   const [tsdBarcodeDataUrl, setTsdBarcodeDataUrl] = useState('');
 
   const fileInputRef = useRef(null);
-  const videoRef = useRef(null);
-  const scannerStreamRef = useRef(null);
-  const scanRafRef = useRef(0);
-  const detectorRef = useRef(null);
-  const zxingReaderRef = useRef(null);
-  const zxingControlsRef = useRef(null);
   const lastCodeRef = useRef('');
   const lastCodeTsRef = useRef(0);
   const pendingBarcodeRequestRef = useRef(new Map());
   const barcodeCacheRef = useRef(barcodeCache);
-  const flashTimeoutRef = useRef(0);
   const autosaveSnapshotRef = useRef('');
   const itemsFeedRef = useRef(null);
   const itemCardRefs = useRef(new Map());
   const keypadRef = useRef(null);
   const blurGuardUntilRef = useRef(0);
+
+  const handleScannedCode = useCallback(async (code) => {
+    const rawCode = String(code || '').trim();
+    const normalizedCode = normalizeScannedCode(rawCode);
+    const now = Date.now();
+    if (!normalizedCode) return;
+    if (normalizedCode === lastCodeRef.current && now - lastCodeTsRef.current < 1500) return;
+
+    lastCodeRef.current = normalizedCode;
+    lastCodeTsRef.current = now;
+    scanner.setLastCode(normalizedCode);
+    setBindTargetBarcode(normalizedCode);
+
+    if (tsdOpen) {
+      if (rawCode.startsWith('CEN;')) {
+        const qrResult = parseTsdQr(rawCode);
+        if (!qrResult) {
+          scanner.setScannerStatus('Неверный формат: ' + code);
+          track('tsd_qr_rejected', { reason: 'invalid_format' });
+          return;
+        }
+        setTsdResult({ ...qrResult, generated: false });
+        scanner.setScannerStatus('QR-код считан');
+        scanner.triggerScanSuccessFlash();
+        triggerHaptic(70, 'scan');
+        track('tsd_qr_scanned', { generated: false });
+        return;
+      }
+
+      setTsdPriceInput('');
+      setTsdPriceModalOpen(true);
+      setTsdResult({ raw: '', barcode: String(code).trim(), price: '', date: '', generated: true });
+      scanner.setScannerStatus('Введите цену товара');
+      triggerHaptic(70, 'scan');
+      return;
+    }
+
+    try {
+      scanner.setScannerStatus('Поиск артикула...');
+      const resolved = await resolveBarcodeWithCache(normalizedCode);
+      const codes = resolved?.codes || [];
+
+      if (resolved?.resolved && codes.length > 0) {
+        // Find first code from resolved list that exists in active recount
+        const activeItems = activeRecount?.items || [];
+        const activeItemCodes = new Set(activeItems.map(item => String(item.code)));
+        const matchedCode = codes.find(c => activeItemCodes.has(String(c)));
+
+        if (matchedCode) {
+          // Found matching code in current recount - auto-select it
+          setSearch(String(matchedCode));
+          scanner.setScannerStatus(`Штрихкод считан (${resolved.source || 'cache'})`);
+          setUnresolvedBarcode('');
+          setCandidateCodes(codes);
+          scanner.triggerScanSuccessFlash();
+          track('barcode_scanned', { area: 'recount', resolved: true });
+          track('barcode_lookup_succeeded', { source: resolved.source || 'unknown' });
+        } else {
+          // No matching codes in active recount - set as unresolved
+          scanner.setScannerStatus('Артикул не найден в просчете, поиск по штрихкоду');
+          setUnresolvedBarcode(normalizedCode);
+          setCandidateCodes(codes);
+          track('barcode_lookup_no_match', { candidates_count: codes.length });
+        }
+      } else {
+        // Not resolved or empty codes - set as unresolved
+        setSearch(normalizedCode);
+        scanner.setScannerStatus('Артикул не найден, поиск по штрихкоду');
+        setUnresolvedBarcode(normalizedCode);
+        setCandidateCodes([]);
+        track('barcode_lookup_failed', { reason: 'not_found' });
+      }
+    } catch {
+      setSearch(normalizedCode);
+      scanner.setScannerStatus('Ошибка резолва, поиск по штрихкоду');
+      setUnresolvedBarcode(normalizedCode);
+      setCandidateCodes([]);
+      track('barcode_lookup_failed', { reason: 'request_error' });
+    }
+
+    triggerHaptic(70, 'scan');
+  }, [tsdOpen, activeRecount]);
+
+  const scanner = useBarcodeScanner({
+    activeRecount,
+    tsdOpen,
+    onScannedCode: handleScannedCode
+  });
 
   useEffect(() => {
     if (!activeFactCode) return undefined;
@@ -521,15 +413,6 @@ export default function App() {
   }, [feedbackSoundEnabled]);
 
   useEffect(() => {
-    return () => {
-      if (flashTimeoutRef.current) {
-        clearTimeout(flashTimeoutRef.current);
-      }
-      stopScanner();
-    };
-  }, []);
-
-  useEffect(() => {
     if (!token) return;
 
     setAuthToken(token);
@@ -539,7 +422,7 @@ export default function App() {
         setUser(nextUser);
 
         if (nextUser?.isAdmin) {
-          return Promise.all([refreshAdminUsers(), refreshAdminLogs('all'), refreshAdminShopApiSettings(), refreshAdminPatchNotes()]);
+          return Promise.all([refreshAdminUsers(), refreshAdminLogs('all'), refreshAdminShopApiSettings(), refreshAdminPatchNotes(), refreshAdminContactLinks()]);
         }
         if (!nextUser?.subscriptionActive) {
           setActiveRecount(null);
@@ -651,51 +534,71 @@ export default function App() {
           ...row
         };
       })
-        .filter(item => item.delta !== 0)
-        .filter(item => mismatchFilter !== 'missing' || item.fact === null);
-      }, [activeRecount, values, mismatchFilter]);
+      .filter(item => item.delta !== 0)
+      .filter(item => mismatchFilter !== 'missing' || item.fact === null);
+  }, [activeRecount, values, mismatchFilter]);
 
   const sortedPatchNotes = useMemo(() => sortPatchNotes(patchNotes), [patchNotes]);
   const sortedAdminPatchNotes = useMemo(() => sortPatchNotes(adminPatchNotes), [adminPatchNotes]);
 
-  function valueMapForProgress(items, valueMap) {
-    const source = items && Array.isArray(items) ? items : [];
-    const result = {};
-    for (const item of source) {
-      result[item.code] = valueMap?.[item.code] ?? '';
+  const filteredAdminUsers = useMemo(() => {
+    let list = Array.isArray(adminUsers) ? adminUsers : [];
+    const query = adminUserSearch.trim().toLowerCase();
+    if (query) {
+      list = list.filter(u => String(u.login || '').toLowerCase().includes(query) || String(u.id || '').toLowerCase().includes(query));
     }
-    return result;
+    if (adminUserFilter === 'active') {
+      list = list.filter(u => u.isAdmin || u.subscriptionActive);
+    } else if (adminUserFilter === 'inactive') {
+      list = list.filter(u => !u.isAdmin && !u.subscriptionActive);
+    } else if (adminUserFilter === 'admin') {
+      list = list.filter(u => u.isAdmin);
+    }
+    return list;
+  }, [adminUsers, adminUserSearch, adminUserFilter]);
+
+  const activeUsersCount = useMemo(() => {
+    return adminUsers.filter(u => u.isAdmin || u.subscriptionActive).length;
+  }, [adminUsers]);
+
+  const inactiveUsersCount = useMemo(() => {
+    return adminUsers.filter(u => !u.isAdmin && !u.subscriptionActive).length;
+  }, [adminUsers]);
+
+  const filteredAdminLogs = useMemo(() => {
+    let list = Array.isArray(adminLogEntries) ? adminLogEntries : [];
+    const query = adminLogSearch.trim().toLowerCase();
+    if (query) {
+      list = list.filter(entry => {
+        const eventMatch = String(entry.event || '').toLowerCase().includes(query);
+        const loginMatch = String(entry.actorLogin || '').toLowerCase().includes(query);
+        const ipMatch = String(entry.ip || '').toLowerCase().includes(query);
+        const metaMatch = entry.meta ? JSON.stringify(entry.meta).toLowerCase().includes(query) : false;
+        return eventMatch || loginMatch || ipMatch || metaMatch;
+      });
+    }
+    return list;
+  }, [adminLogEntries, adminLogSearch]);
+
+  const totalLogsCount = useMemo(() => {
+    return Object.values(adminLogCounts || {}).reduce((acc, value) => acc + Number(value || 0), 0);
+  }, [adminLogCounts]);
+
+  function showAdminSuccess(msg) {
+    setAdminSuccess(msg);
+    setTimeout(() => {
+      setAdminSuccess(prev => (prev === msg ? '' : prev));
+    }, 4000);
   }
 
-  function computeRowState(item, valueMap) {
-    const raw = sanitizeFactExpression(valueMap[item.code] ?? '');
-    const manualFact = sumFactExpression(raw);
-    const hasManual = raw.length > 0 && manualFact !== null;
-    const docQty = safeNumber(item.docQty);
-    const fact = hasManual ? manualFact : null;
-    const delta = fact === null ? null : fact - docQty;
-    const status = delta === null ? '' : delta === 0 ? 'match' : delta < 0 ? 'missing' : 'excess';
-    const factDisplay = hasManual ? raw : '';
-
-    return {
-      raw,
-      docQty,
-      fact,
-      factDisplay,
-      delta,
-      status
-    };
-  }
-
-  function triggerScanSuccessFlash() {
-    if (flashTimeoutRef.current) {
-      clearTimeout(flashTimeoutRef.current);
+  function copyLogToClipboard(log) {
+    try {
+      navigator.clipboard.writeText(JSON.stringify(log, null, 2));
+      setCopiedLogId(log.id);
+      setTimeout(() => setCopiedLogId(prev => (prev === log.id ? '' : prev)), 2000);
+    } catch {
+      // ignore
     }
-    setScanSuccessFlash(true);
-    flashTimeoutRef.current = window.setTimeout(() => {
-      setScanSuccessFlash(false);
-      flashTimeoutRef.current = 0;
-    }, 220);
   }
 
   async function refreshDashboard() {
@@ -763,6 +666,15 @@ export default function App() {
     }
   }
 
+  async function refreshAdminContactLinks() {
+    try {
+      const data = await getAdminContactLinks();
+      setAdminContactLinks(data?.links || { telegramUrl: '', maxUrl: '' });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось загрузить ссылки для связи');
+    }
+  }
+
   async function refreshAdminPatchNotes() {
     setAdminPatchNotesLoading(true);
     setError('');
@@ -787,7 +699,7 @@ export default function App() {
     setUser(nextUser);
 
     if (nextUser?.isAdmin) {
-      await Promise.all([refreshAdminUsers(), refreshAdminLogs('all'), refreshAdminShopApiSettings(), refreshAdminPatchNotes()]);
+      await Promise.all([refreshAdminUsers(), refreshAdminLogs('all'), refreshAdminShopApiSettings(), refreshAdminPatchNotes(), refreshAdminContactLinks()]);
       return;
     }
 
@@ -826,7 +738,7 @@ export default function App() {
       // no-op
     }
 
-    stopScanner();
+    scanner.stopScanner();
     localStorage.removeItem(TOKEN_KEY);
     setAuthToken('');
     setToken('');
@@ -881,6 +793,8 @@ export default function App() {
       await createAdminPatchNote({ date, title, text });
       setNewPatchNoteTitle('');
       setNewPatchNoteText('');
+      setAdminNewPatchNoteOpen(false);
+      showAdminSuccess('Патчноут успешно создан');
       await Promise.all([refreshAdminPatchNotes(), refreshPatchNotes()]);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось создать патчноут');
@@ -904,6 +818,7 @@ export default function App() {
         title: normalized.title,
         text: normalized.text
       });
+      showAdminSuccess('Патчноут успешно сохранен');
       await Promise.all([refreshAdminPatchNotes(), refreshPatchNotes()]);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось сохранить патчноут');
@@ -921,6 +836,7 @@ export default function App() {
     setError('');
     try {
       await deleteAdminPatchNote(normalizedId);
+      showAdminSuccess('Патчноут успешно удален');
       await Promise.all([refreshAdminPatchNotes(), refreshPatchNotes()]);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось удалить патчноут');
@@ -1017,9 +933,9 @@ export default function App() {
     try {
       await saveRecountProgress(activeRecount.id, payload);
       autosaveSnapshotRef.current = JSON.stringify(payload);
-      setScannerStatus('Прогресс сохранен');
+      scanner.setScannerStatus('Прогресс сохранен');
     } catch {
-      setScannerStatus('Ошибка сохранения');
+      scanner.setScannerStatus('Ошибка сохранения');
     }
 
     setMenuOpen(false);
@@ -1031,7 +947,6 @@ export default function App() {
       return { resolved: false, codes: [], source: 'empty' };
     }
 
-    // The scan loop re-invokes this closure via RAF, so read the ref, not the stale state.
     const localHit = barcodeCacheRef.current[barcode];
     if (localHit?.codes?.length) {
       return {
@@ -1072,83 +987,6 @@ export default function App() {
     return requestPromise;
   }
 
-  async function applyScannedCode(code) {
-    const normalizedCode = normalizeScannedCode(code);
-    const now = Date.now();
-    if (!normalizedCode) return;
-    if (normalizedCode === lastCodeRef.current && now - lastCodeTsRef.current < 1500) return;
-
-    lastCodeRef.current = normalizedCode;
-    lastCodeTsRef.current = now;
-    setLastCode(normalizedCode);
-    setBindTargetBarcode(normalizedCode);
-
-    if (tsdOpen) {
-      handleTsdScan(code);
-      return;
-    }
-
-    try {
-      setScannerStatus('Поиск артикула...');
-      const resolved = await resolveBarcodeWithCache(normalizedCode);
-      const codes = resolved?.codes || [];
-
-      if (resolved?.resolved && codes.length === 1) {
-        setSearch(codes[0]);
-        setScannerStatus(`Штрихкод считан (${resolved.source || 'cache'})`);
-        setUnresolvedBarcode('');
-        setCandidateCodes(codes);
-        triggerScanSuccessFlash();
-        track('barcode_scanned', { area: 'recount', resolved: true });
-        track('barcode_lookup_succeeded', { source: resolved.source || 'unknown' });
-      } else if (resolved?.resolved && codes.length > 1) {
-        setScannerStatus('Найдено несколько товаров для этого штрихкода');
-        setUnresolvedBarcode(normalizedCode);
-        setCandidateCodes(codes);
-        track('barcode_lookup_ambiguous', { candidates_count: codes.length });
-      } else {
-        setSearch(normalizedCode);
-        setScannerStatus('Артикул не найден, поиск по штрихкоду');
-        setUnresolvedBarcode(normalizedCode);
-        setCandidateCodes([]);
-        track('barcode_lookup_failed', { reason: 'not_found' });
-      }
-    } catch {
-      setSearch(normalizedCode);
-      setScannerStatus('Ошибка резолва, поиск по штрихкоду');
-      setUnresolvedBarcode(normalizedCode);
-      setCandidateCodes([]);
-      track('barcode_lookup_failed', { reason: 'request_error' });
-    }
-
-    triggerHaptic(70, 'scan');
-  }
-
-  function handleTsdScan(code) {
-    const rawCode = String(code || '').trim();
-    const normalizedCode = normalizeScannedCode(rawCode);
-    const qrResult = parseTsdQr(rawCode);
-    if (rawCode.startsWith('CEN;')) {
-      if (!qrResult) {
-        setScannerStatus('Неверный формат: ' + code);
-        track('tsd_qr_rejected', { reason: 'invalid_format' });
-        return;
-      }
-      setTsdResult({ ...qrResult, generated: false });
-      setScannerStatus('QR-код считан');
-      triggerScanSuccessFlash();
-      triggerHaptic(70, 'scan');
-      track('tsd_qr_scanned', { generated: false });
-      return;
-    }
-
-    setTsdPriceInput('');
-    setTsdPriceModalOpen(true);
-    setTsdResult({ raw: '', barcode: String(code).trim(), price: '', date: '', generated: true });
-    setScannerStatus('Введите цену товара');
-    triggerHaptic(70, 'scan');
-  }
-
   function confirmTsdPrice() {
     const price = normalizeTsdPrice(tsdPriceInput);
     if (!price || !tsdResult?.barcode) {
@@ -1167,36 +1005,28 @@ export default function App() {
     });
     setTsdPriceModalOpen(false);
     setError('');
-    setScannerStatus('QR-код сформирован');
-    triggerScanSuccessFlash();
+    scanner.setScannerStatus('QR-код сформирован');
+    scanner.triggerScanSuccessFlash();
     track('tsd_qr_generated', { source: 'barcode' });
   }
 
   function openTsd() {
-    stopScanner();
+    scanner.stopScanner();
     window.history.pushState({}, '', '/tsd');
     setTsdOpen(true);
     setKeypadLabOpen(false);
     setTsdResult(null);
     setTsdPriceModalOpen(false);
-    setScannerStatus('Сканер выключен');
+    scanner.setScannerStatus('Сканер выключен');
     track('tsd_opened');
   }
 
   function closeTsd() {
-    stopScanner();
+    scanner.stopScanner();
     window.history.replaceState({}, '', '/');
     setTsdOpen(false);
     setTsdResult(null);
     setTsdPriceModalOpen(false);
-  }
-
-  function openKeypadLab() {
-    if (!import.meta.env.DEV) return;
-    stopScanner();
-    window.history.pushState({}, '', '/keypad-lab');
-    setTsdOpen(false);
-    setKeypadLabOpen(true);
   }
 
   function closeKeypadLab() {
@@ -1205,9 +1035,9 @@ export default function App() {
   }
 
   function openBindModal() {
-    const targetBarcode = normalizeBarcodeValue(bindTargetBarcode || unresolvedBarcode || lastCode);
+    const targetBarcode = normalizeBarcodeValue(bindTargetBarcode || unresolvedBarcode || scanner.lastCode);
     if (!targetBarcode) {
-      setScannerStatus('Сначала отсканируйте штрихкод');
+      scanner.setScannerStatus('Сначала отсканируйте штрихкод');
       return;
     }
     setBindTargetBarcode(targetBarcode);
@@ -1220,38 +1050,8 @@ export default function App() {
     setBindSearch('');
   }
 
-  function reassignBarcodeToItem(cache, barcode, itemCode) {
-    const normalizedItemCode = String(itemCode);
-    const nextCache = {};
-
-    for (const [mappedBarcode, record] of Object.entries(cache || {})) {
-      const codes = Array.isArray(record?.codes)
-        ? record.codes.map(String)
-        : record?.code ? [String(record.code)] : [];
-      const remainingCodes = mappedBarcode === barcode
-        ? codes
-        : codes.filter(code => code !== normalizedItemCode);
-
-      if (remainingCodes.length) {
-        nextCache[mappedBarcode] = {
-          ...record,
-          codes: Array.from(new Set(remainingCodes))
-        };
-      }
-    }
-
-    const currentCodes = nextCache[barcode]?.codes || [];
-    nextCache[barcode] = {
-      ...(nextCache[barcode] || {}),
-      codes: Array.from(new Set([...currentCodes, normalizedItemCode])),
-      source: 'manual'
-    };
-
-    return nextCache;
-  }
-
-  async function bindBarcodeToSelectedItem(itemCode, confirm = false) {
-    const barcode = normalizeBarcodeValue(bindTargetBarcode || unresolvedBarcode || lastCode);
+  async function bindBarcodeToSelectedItem(itemCode) {
+    const barcode = normalizeBarcodeValue(bindTargetBarcode || unresolvedBarcode || scanner.lastCode);
     if (!barcode) return;
     if (!activeRecount?.id) return;
 
@@ -1261,189 +1061,24 @@ export default function App() {
       await bindBarcodeToItem({
         barcode,
         itemCode: normalizedItemCode,
-        recountId: activeRecount.id,
-        confirm
+        recountId: activeRecount.id
       });
     } catch (err) {
-      const conflict = err?.status === 409 && err?.payload?.conflict === true;
-      if (conflict && !confirm) {
-        const existingBarcodes = Array.isArray(err?.payload?.existingBarcodes)
-          ? err.payload.existingBarcodes.map(String)
-          : [];
-        const oldBarcodeText = existingBarcodes.length ? existingBarcodes.join(', ') : 'неизвестно';
-        const approved = window.confirm(
-          `Код ${normalizedItemCode} уже привязан к штрихкоду ${oldBarcodeText}.\n\nПерепривязать его к штрихкоду ${barcode}?`
-        );
-        if (!approved) {
-          setScannerStatus('Перепривязка отменена');
-          return;
-        }
-        await bindBarcodeToSelectedItem(normalizedItemCode, true);
-        return;
-      }
       setError(err instanceof Error ? err.message : 'Не удалось привязать штрихкод');
       return;
     }
 
+    // Update local cache without removing code from other barcodes
     setBarcodeCache(prev => reassignBarcodeToItem(prev, barcode, normalizedItemCode));
 
     setSearch(normalizedItemCode);
-    setScannerStatus('Штрихкод привязан вручную');
+    scanner.setScannerStatus('Штрихкод привязан вручную');
     setUnresolvedBarcode('');
     setCandidateCodes([normalizedItemCode]);
     closeBindModal();
-    triggerScanSuccessFlash();
+    scanner.triggerScanSuccessFlash();
     triggerHaptic(70, 'scan');
     track('barcode_bound_manually');
-  }
-
-  async function scanBarcodeFrame() {
-    const video = videoRef.current;
-    const detector = detectorRef.current;
-    if (!video || !detector || !scannerOn) return;
-
-    try {
-      const codes = await detector.detect(video);
-      const code = codes[0]?.rawValue;
-      if (code) void applyScannedCode(code);
-    } catch {
-      // no-op
-    }
-
-    if (scannerOn) {
-      scanRafRef.current = requestAnimationFrame(scanBarcodeFrame);
-    }
-  }
-
-  async function startScanner() {
-    const video = videoRef.current;
-    if (!video) return;
-    if (!activeRecount?.items?.length && !tsdOpen) {
-      setScannerStatus('Сначала загрузите PDF');
-      return;
-    }
-
-    if (video) {
-      video.setAttribute('playsinline', 'true');
-      video.setAttribute('autoplay', 'true');
-      video.setAttribute('muted', 'true');
-    }
-
-    try {
-      unlockFeedbackAudio();
-      setScannerStatus('Запуск камеры...');
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: 'environment' } },
-        audio: false
-      });
-
-      scannerStreamRef.current = stream;
-      video.srcObject = stream;
-      await video.play();
-      track('scanner_started', { area: tsdOpen ? 'tsd' : 'recount' });
-
-      if (supportsBarcodeDetector()) {
-        detectorRef.current = new window.BarcodeDetector({ formats: ['code_128', 'ean_13', 'ean_8', 'qr_code'] });
-        setScannerOn(true);
-        setScannerStatus('Наведите на штрихкод');
-        scanRafRef.current = requestAnimationFrame(scanBarcodeFrame);
-        return;
-      }
-
-      const zxing = await import('@zxing/browser');
-      const reader = new zxing.BrowserMultiFormatReader();
-      zxingReaderRef.current = reader;
-      const controls = await reader.decodeFromVideoDevice(undefined, video, resultObj => {
-        if (resultObj) void applyScannedCode(resultObj.getText());
-      });
-      zxingControlsRef.current = controls;
-      setScannerOn(true);
-      setScannerStatus('Наведите на штрихкод');
-    } catch {
-      setScannerStatus('Не удалось запустить сканер');
-      stopScanner();
-    }
-  }
-
-  function stopScanner() {
-    setScannerOn(false);
-    setTorchOn(false);
-    setScannerStatus('Сканер выключен');
-
-    if (scanRafRef.current) {
-      cancelAnimationFrame(scanRafRef.current);
-      scanRafRef.current = 0;
-    }
-
-    zxingControlsRef.current?.stop?.();
-    zxingControlsRef.current = null;
-    zxingReaderRef.current?.reset?.();
-    zxingReaderRef.current = null;
-    detectorRef.current = null;
-
-    const stream = scannerStreamRef.current;
-    if (stream) {
-      stream.getTracks().forEach(track => track.stop());
-      scannerStreamRef.current = null;
-    }
-
-    const video = videoRef.current;
-    if (video?.srcObject) {
-      video.srcObject = null;
-    }
-  }
-
-  async function toggleScanner() {
-    if (scannerOn) {
-      stopScanner();
-      return;
-    }
-    await startScanner();
-  }
-
-  async function toggleTorch() {
-    const stream = scannerStreamRef.current;
-    if (!stream) {
-      setScannerStatus('Сначала включите сканер');
-      return;
-    }
-
-    const track = stream.getVideoTracks()[0];
-    if (!track) return;
-
-    try {
-      const next = !torchOn;
-      await track.applyConstraints({ advanced: [{ torch: next }] });
-      setTorchOn(next);
-    } catch {
-      setScannerStatus('Фонарик не поддерживается');
-    }
-  }
-
-  async function focusScannerCamera() {
-    const stream = scannerStreamRef.current;
-    const track = stream?.getVideoTracks?.()[0];
-    if (!track?.applyConstraints) return;
-
-    try {
-      const capabilities = track.getCapabilities?.();
-      const focusModes = capabilities?.focusMode || [];
-      const focusMode = focusModes.includes('continuous')
-        ? 'continuous'
-        : focusModes.includes('single-shot')
-          ? 'single-shot'
-          : null;
-      if (focusMode) {
-        await track.applyConstraints({ advanced: [{ focusMode }] });
-      }
-    } catch {
-      // Autofocus is optional and not supported by every camera.
-    }
-  }
-
-  function handleScannerDoubleClick(event) {
-    event.preventDefault();
-    void toggleTorch();
   }
 
   function updateFact(code, nextValue) {
@@ -1541,7 +1176,7 @@ export default function App() {
       setCounterName('');
       setGroupName('');
 
-      stopScanner();
+      scanner.stopScanner();
       setActiveRecount(null);
       await refreshDashboard();
     } catch (err) {
@@ -1578,7 +1213,7 @@ export default function App() {
       setCounterName('');
       setGroupName('');
 
-      stopScanner();
+      scanner.stopScanner();
       setActiveRecount(null);
       await refreshDashboard();
     } catch (err) {
@@ -1589,7 +1224,7 @@ export default function App() {
   }
 
   async function goHome() {
-    stopScanner();
+    scanner.stopScanner();
     setActiveRecount(null);
     setMenuOpen(false);
     setMismatchModalOpen(false);
@@ -1601,14 +1236,15 @@ export default function App() {
     await refreshDashboard();
   }
 
-  async function activateSubscriptionForUser(targetUserId) {
-    const parsedDays = Number.parseInt(activationDays, 10);
+  async function activateSubscriptionForUser(targetUserId, customDays) {
+    const parsedDays = Number.parseInt(customDays !== undefined ? customDays : activationDays, 10);
     const days = Number.isFinite(parsedDays) ? Math.max(1, Math.min(parsedDays, 3650)) : 30;
 
     setActivatingUserId(targetUserId);
     setError('');
     try {
       await activateUserSubscription(targetUserId, { days });
+      showAdminSuccess(`Подписка успешно активирована (+${days} дн.)`);
       await refreshAdminUsers();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось активировать подписку');
@@ -1622,6 +1258,7 @@ export default function App() {
     setError('');
     try {
       await resetUserDeviceBinding(targetUserId);
+      showAdminSuccess('Привязка устройства сброшена');
       await refreshAdminUsers();
       await refreshAdminLogs(adminLogLevel);
     } catch (err) {
@@ -1639,6 +1276,7 @@ export default function App() {
     try {
       await deleteAdminUser(targetUserId);
       setExpandedUserId('');
+      showAdminSuccess('Аккаунт успешно удален');
       await refreshAdminUsers();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось удалить пользователя');
@@ -1669,7 +1307,7 @@ export default function App() {
     setError('');
     try {
       await deleteRecount(activeRecount.id);
-      stopScanner();
+      scanner.stopScanner();
       setActiveRecount(null);
       setValues({});
       setSearch('');
@@ -1683,8 +1321,8 @@ export default function App() {
   }
 
   async function saveShopApiToken() {
-    const token = shopApiTokenInput.trim();
-    if (!token) {
+    const tokenInput = shopApiTokenInput.trim();
+    if (!tokenInput) {
       setError('Введите токен API магазина');
       return;
     }
@@ -1692,9 +1330,10 @@ export default function App() {
     setShopApiTokenSaving(true);
     setError('');
     try {
-      const data = await updateAdminShopApiToken(token);
+      const data = await updateAdminShopApiToken(tokenInput);
       setShopApiTokenStatus(data);
       setShopApiTokenInput('');
+      showAdminSuccess('Токен API магазина успешно сохранен');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось сохранить токен API магазина');
     } finally {
@@ -1702,11 +1341,31 @@ export default function App() {
     }
   }
 
+  async function saveContactLinks() {
+    setError('');
+    setAdminContactLinksSaving(true);
+    try {
+      const data = await updateAdminContactLinks({
+        telegramUrl: adminContactLinks.telegramUrl,
+        maxUrl: adminContactLinks.maxUrl
+      });
+      setAdminContactLinks(data?.links || adminContactLinks);
+      setUser(prev => prev ? { ...prev, supportLinks: data?.links || prev.supportLinks } : prev);
+      showAdminSuccess('Ссылки для связи успешно сохранены');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось сохранить ссылки для связи');
+    } finally {
+      setAdminContactLinksSaving(false);
+    }
+  }
+
   async function toggleDeviceBinding(targetUser) {
     setActivatingUserId(targetUser.id);
     setError('');
+    const willDisable = !targetUser.deviceBindingDisabled;
     try {
-      await setUserDeviceBindingDisabled(targetUser.id, !targetUser.deviceBindingDisabled);
+      await setUserDeviceBindingDisabled(targetUser.id, willDisable);
+      showAdminSuccess(willDisable ? 'Ограничение устройства отключено' : 'Ограничение устройства включено');
       await refreshAdminUsers();
       await refreshAdminLogs(adminLogLevel);
     } catch (err) {
@@ -1745,975 +1404,240 @@ export default function App() {
 
   if (!token && !tsdOpen) {
     return (
-      <div className="auth-page">
-        <form className="auth-card" onSubmit={handleAuthSubmit}>
-          <h1>Локалка</h1>
-          <p>{authMode === 'login' ? 'Вход в систему' : 'Регистрация пользователя'}</p>
-
-          <input
-            value={authLogin}
-            onChange={event => setAuthLogin(event.target.value)}
-            placeholder="Логин"
-            autoComplete="username"
-            required
-          />
-          <input
-            value={authPassword}
-            onChange={event => setAuthPassword(event.target.value)}
-            placeholder="Пароль"
-            type="password"
-            autoComplete={authMode === 'login' ? 'current-password' : 'new-password'}
-            required
-          />
-
-          {authError ? <div className="status error">{authError}</div> : null}
-
-          <button type="submit" disabled={authLoading}>
-            {authLoading ? 'Подождите...' : authMode === 'login' ? 'Войти' : 'Зарегистрироваться'}
-          </button>
-
-          <button
-            type="button"
-            className="ghost"
-            onClick={() => {
-              setAuthError('');
-              setAuthMode(prev => (prev === 'login' ? 'register' : 'login'));
-            }}
-          >
-            {authMode === 'login' ? 'Создать аккаунт' : 'У меня уже есть аккаунт'}
-          </button>
-
-        </form>
-      </div>
+      <AuthPage
+        authMode={authMode}
+        setAuthMode={setAuthMode}
+        authLogin={authLogin}
+        setAuthLogin={setAuthLogin}
+        authPassword={authPassword}
+        setAuthPassword={setAuthPassword}
+        authLoading={authLoading}
+        authError={authError}
+        setAuthError={setAuthError}
+        handleAuthSubmit={handleAuthSubmit}
+      />
     );
   }
 
   if (user?.isAdmin) {
     return (
-      <div className="home-page">
-        <header className="home-header">
-          <div>
-            <h2>Админ-панель</h2>
-            <p>Пользователь: {user?.login || '-'}</p>
-          </div>
-          <button type="button" onClick={() => handleLogout()} className="ghost">Выйти</button>
-        </header>
-
-        {error ? <section className="status error">{error}</section> : null}
-
-        <div className="admin-tabs">
-          <button
-            type="button"
-            className={`admin-tab ${adminTab === 'users' ? 'active' : ''}`}
-            onClick={() => setAdminTab('users')}
-          >
-            Управление аккаунтами
-          </button>
-          <button
-            type="button"
-            className={`admin-tab ${adminTab === 'logs' ? 'active' : ''}`}
-            onClick={() => setAdminTab('logs')}
-          >
-            Просмотр логов
-          </button>
-          <button
-            type="button"
-            className={`admin-tab ${adminTab === 'shop-api' ? 'active' : ''}`}
-            onClick={() => setAdminTab('shop-api')}
-          >
-            API магазина
-          </button>
-          <button
-            type="button"
-            className={`admin-tab ${adminTab === 'patchnotes' ? 'active' : ''}`}
-            onClick={() => {
-              setAdminTab('patchnotes');
-              void refreshAdminPatchNotes();
-            }}
-          >
-            Патчноуты
-          </button>
-        </div>
-
-        {adminTab === 'users' ? (
-        <section className="panel">
-          <h3>Пользователи</h3>
-          <div className="admin-actions-row">
-            <label className="admin-days-input">
-              Дней активации
-              <input
-                type="number"
-                min="1"
-                max="3650"
-                value={activationDays}
-                onChange={event => setActivationDays(event.target.value)}
-              />
-            </label>
-            <button type="button" className="ghost" onClick={refreshAdminUsers} disabled={homeLoading}>
-              Обновить список
-            </button>
-          </div>
-
-          {homeLoading ? <div className="status">Загрузка...</div> : null}
-
-          {!homeLoading ? (
-            <div className="admin-users-list">
-              {adminUsers.map(item => (
-                <article key={item.id} className="admin-user-card">
-                  <div className="admin-user-main">
-                    <div className="admin-user-login">{item.login}</div>
-                    <div className="line mini">Статус: {formatSubscriptionStatusLabel(item)}</div>
-                    <div className="line mini">Устройство: {item.deviceBound ? 'Привязано' : 'Не привязано'}</div>
-                  </div>
-                  <div className="admin-user-actions">
-                    <button
-                      type="button"
-                      onClick={() => activateSubscriptionForUser(item.id)}
-                      disabled={item.isAdmin || activatingUserId === item.id}
-                    >
-                      {activatingUserId === item.id ? 'Подождите...' : 'Активировать'}
-                    </button>
-                    <button
-                      type="button"
-                      className="ghost"
-                      onClick={() => setExpandedUserId(item.id)}
-                    >
-                      Управление
-                    </button>
-                  </div>
-                </article>
-              ))}
-              {!adminUsers.length ? <div className="status">Пользователи не найдены</div> : null}
-            </div>
-          ) : null}
-        </section>
-        ) : null}
-
-        {adminTab === 'shop-api' ? (
-        <section className="panel">
-          <h3>API магазина</h3>
-          <div className="admin-api-status line mini">
-            Токен: {shopApiTokenStatus?.configured ? `установлен (последние символы: ${shopApiTokenStatus.tokenLast5 || '—'})` : 'не установлен'}
-          </div>
-          <label className="settings-field">
-            Новый токен
-            <input
-              type="password"
-              value={shopApiTokenInput}
-              onChange={event => setShopApiTokenInput(event.target.value)}
-              placeholder="Введите новый токен API магазина"
-              autoComplete="new-password"
-            />
-          </label>
-          <div className="admin-api-actions">
-            <button type="button" onClick={saveShopApiToken} disabled={shopApiTokenSaving}>
-              {shopApiTokenSaving ? 'Сохранение...' : 'Сохранить токен'}
-            </button>
-          </div>
-        </section>
-        ) : null}
-
-        {adminTab === 'patchnotes' ? (
-        <section className="panel">
-          <h3>Патчноуты</h3>
-          <div className="admin-actions-row">
-            <button type="button" className="ghost" onClick={() => refreshAdminPatchNotes()} disabled={adminPatchNotesLoading}>
-              {adminPatchNotesLoading ? 'Загрузка...' : 'Обновить список'}
-            </button>
-          </div>
-
-          <div className="patchnote-editor-card">
-            <h4>Новый патчноут</h4>
-            <label className="settings-field">
-              Дата
-              <input
-                type="date"
-                value={newPatchNoteDate}
-                onChange={event => setNewPatchNoteDate(event.target.value)}
-              />
-            </label>
-            <label className="settings-field">
-              Заголовок
-              <input
-                value={newPatchNoteTitle}
-                onChange={event => setNewPatchNoteTitle(event.target.value)}
-                placeholder="Краткий заголовок"
-              />
-            </label>
-            <label className="settings-field">
-              Текст
-              <textarea
-                value={newPatchNoteText}
-                onChange={event => setNewPatchNoteText(event.target.value)}
-                placeholder="Полный текст патчноута"
-                rows={5}
-              />
-            </label>
-            <button
-              type="button"
-              onClick={createPatchNoteFromAdmin}
-              disabled={adminPatchNotesSavingId === 'new'}
-            >
-              {adminPatchNotesSavingId === 'new' ? 'Сохранение...' : 'Добавить патчноут'}
-            </button>
-          </div>
-
-          {adminPatchNotesLoading ? <div className="status">Загрузка патчноутов...</div> : null}
-          {!adminPatchNotesLoading ? (
-            <div className="admin-patchnote-list">
-              {sortedAdminPatchNotes.map(item => (
-                <article key={item.id} className="patchnote-editor-card">
-                  <label className="settings-field">
-                    Дата
-                    <input
-                      type="date"
-                      value={item.date}
-                      onChange={event => updateAdminPatchNoteField(item.id, 'date', event.target.value)}
-                    />
-                  </label>
-                  <label className="settings-field">
-                    Заголовок
-                    <input
-                      value={item.title}
-                      onChange={event => updateAdminPatchNoteField(item.id, 'title', event.target.value)}
-                    />
-                  </label>
-                  <label className="settings-field">
-                    Текст
-                    <textarea
-                      value={item.text}
-                      onChange={event => updateAdminPatchNoteField(item.id, 'text', event.target.value)}
-                      rows={6}
-                    />
-                  </label>
-                  <div className="patchnote-editor-actions">
-                    <button
-                      type="button"
-                      onClick={() => void savePatchNoteFromAdmin(item)}
-                      disabled={adminPatchNotesSavingId === item.id || adminPatchNotesDeletingId === item.id}
-                    >
-                      {adminPatchNotesSavingId === item.id ? 'Сохранение...' : 'Сохранить'}
-                    </button>
-                    <button
-                      type="button"
-                      className="danger"
-                      onClick={() => void deletePatchNoteFromAdmin(item.id)}
-                      disabled={adminPatchNotesDeletingId === item.id || adminPatchNotesSavingId === item.id}
-                    >
-                      {adminPatchNotesDeletingId === item.id ? 'Удаление...' : 'Удалить'}
-                    </button>
-                  </div>
-                </article>
-              ))}
-              {!sortedAdminPatchNotes.length ? <div className="status">Патчноуты пока отсутствуют</div> : null}
-            </div>
-          ) : null}
-        </section>
-        ) : null}
-
-        {adminTab === 'logs' ? (
-        <section className="panel">
-          <h3>Логи сервера</h3>
-
-          <div className="admin-logs-toolbar">
-            <div className="admin-log-tabs">
-              {ADMIN_LOG_LEVEL_TABS.map(tab => {
-                const key = tab.key;
-                const count = key === 'all'
-                  ? Object.values(adminLogCounts || {}).reduce((acc, value) => acc + Number(value || 0), 0)
-                  : Number(adminLogCounts?.[key] || 0);
-                const isActive = adminLogLevel === key;
-
-                return (
-                  <button
-                    key={key}
-                    type="button"
-                    className={`admin-log-tab ${isActive ? 'active' : ''}`}
-                    onClick={() => refreshAdminLogs(key)}
-                    disabled={adminLogLoading}
-                  >
-                    {tab.label} ({count})
-                  </button>
-                );
-              })}
-            </div>
-
-            <button type="button" className="ghost" onClick={() => refreshAdminLogs(adminLogLevel)} disabled={adminLogLoading}>
-              {adminLogLoading ? 'Загрузка...' : 'Обновить логи'}
-            </button>
-          </div>
-
-          {adminLogLoading ? <div className="status">Загрузка логов...</div> : null}
-
-          {!adminLogLoading ? (
-            <div className="admin-log-list">
-              {adminLogEntries.map(entry => (
-                <article key={entry.id} className="admin-log-item">
-                  <div className="admin-log-item-head">
-                    <span className={`admin-log-level ${String(entry.level || 'info').toLowerCase()}`}>
-                      {formatLogLevel(entry.level)}
-                    </span>
-                    <span className="line mini">{formatLogDateTime(entry.ts)}</span>
-                  </div>
-                  <div className="admin-log-event">{entry.event || '-'}</div>
-                  <div className="line mini">
-                    Пользователь: {entry.actorLogin || '-'} | IP: {entry.ip || '-'}
-                  </div>
-                  <details>
-                    <summary>Детали</summary>
-                    <pre className="admin-log-meta">{JSON.stringify(entry.meta || {}, null, 2)}</pre>
-                  </details>
-                </article>
-              ))}
-
-              {!adminLogEntries.length ? <div className="status">Логи пока отсутствуют</div> : null}
-            </div>
-          ) : null}
-        </section>
-        ) : null}
-
-        {expandedUserId ? (() => {
-          const targetUser = adminUsers.find(item => item.id === expandedUserId);
-          if (!targetUser) return null;
-
-          return (
-            <div className="modal-backdrop" onClick={() => setExpandedUserId('')}>
-              <div className="modal-card" onClick={event => event.stopPropagation()}>
-                <h3>Настройки аккаунта: {targetUser.login}</h3>
-                <div className="line mini">Статус: {formatSubscriptionStatusLabel(targetUser)}</div>
-                <div className="line mini">Устройство: {targetUser.deviceBound ? 'Привязано' : 'Не привязано'}</div>
-                <div className="line mini">
-                  Ограничение устройства: {targetUser.deviceBindingDisabled ? 'Отключено' : 'Включено'}
-                </div>
-                <div className="line mini">Дата регистрации: {formatStartDate(targetUser.createdAt)}</div>
-
-                <div className="admin-account-actions">
-                  <button
-                    type="button"
-                    className="ghost"
-                    onClick={() => resetDeviceBindingForUser(targetUser.id)}
-                    disabled={activatingUserId === targetUser.id}
-                  >
-                    {activatingUserId === targetUser.id ? 'Подождите...' : 'Сбросить привязку устройства'}
-                  </button>
-                  <button
-                    type="button"
-                    className="ghost"
-                    onClick={() => toggleDeviceBinding(targetUser)}
-                    disabled={targetUser.isAdmin || activatingUserId === targetUser.id}
-                  >
-                    {targetUser.deviceBindingDisabled ? 'Включить ограничение устройства' : 'Отключить ограничение устройства'}
-                  </button>
-                </div>
-                <button
-                  type="button"
-                  className="danger"
-                  onClick={() => deleteUserAccount(targetUser.id)}
-                  disabled={targetUser.isAdmin || deletingUserId === targetUser.id}
-                >
-                  {deletingUserId === targetUser.id ? 'Удаление...' : 'Удалить аккаунт'}
-                </button>
-                <button type="button" className="ghost" onClick={() => setExpandedUserId('')}>Закрыть</button>
-              </div>
-            </div>
-          );
-        })() : null}
-      </div>
+      <AdminPage
+        user={user}
+        handleLogout={handleLogout}
+        adminSuccess={adminSuccess}
+        setAdminSuccess={setAdminSuccess}
+        error={error}
+        setError={setError}
+        adminTab={adminTab}
+        setAdminTab={setAdminTab}
+        adminUsers={adminUsers}
+        totalLogsCount={totalLogsCount}
+        sortedAdminPatchNotes={sortedAdminPatchNotes}
+        refreshAdminShopApiSettings={refreshAdminShopApiSettings}
+        refreshAdminContactLinks={refreshAdminContactLinks}
+        refreshAdminPatchNotes={refreshAdminPatchNotes}
+        adminUserSearch={adminUserSearch}
+        setAdminUserSearch={setAdminUserSearch}
+        adminUserFilter={adminUserFilter}
+        setAdminUserFilter={setAdminUserFilter}
+        filteredAdminUsers={filteredAdminUsers}
+        activeUsersCount={activeUsersCount}
+        inactiveUsersCount={inactiveUsersCount}
+        activationDays={activationDays}
+        setActivationDays={setActivationDays}
+        activatingUserId={activatingUserId}
+        homeLoading={homeLoading}
+        refreshAdminUsers={refreshAdminUsers}
+        activateSubscriptionForUser={activateSubscriptionForUser}
+        setExpandedUserId={setExpandedUserId}
+        adminLogLevel={adminLogLevel}
+        refreshAdminLogs={refreshAdminLogs}
+        adminLogLoading={adminLogLoading}
+        adminLogSearch={adminLogSearch}
+        setAdminLogSearch={setAdminLogSearch}
+        setAdminLogVisibleLimit={setAdminLogVisibleLimit}
+        adminLogVisibleLimit={adminLogVisibleLimit}
+        adminLogCounts={adminLogCounts}
+        filteredAdminLogs={filteredAdminLogs}
+        copiedLogId={copiedLogId}
+        copyLogToClipboard={copyLogToClipboard}
+        adminNewPatchNoteOpen={adminNewPatchNoteOpen}
+        setAdminNewPatchNoteOpen={setAdminNewPatchNoteOpen}
+        adminPatchNotesLoading={adminPatchNotesLoading}
+        newPatchNoteDate={newPatchNoteDate}
+        setNewPatchNoteDate={setNewPatchNoteDate}
+        newPatchNoteTitle={newPatchNoteTitle}
+        setNewPatchNoteTitle={setNewPatchNoteTitle}
+        newPatchNoteText={newPatchNoteText}
+        setNewPatchNoteText={setNewPatchNoteText}
+        createPatchNoteFromAdmin={createPatchNoteFromAdmin}
+        adminPatchNotesSavingId={adminPatchNotesSavingId}
+        adminPatchNotesDeletingId={adminPatchNotesDeletingId}
+        updateAdminPatchNoteField={updateAdminPatchNoteField}
+        savePatchNoteFromAdmin={savePatchNoteFromAdmin}
+        deletePatchNoteFromAdmin={deletePatchNoteFromAdmin}
+        shopApiTokenStatus={shopApiTokenStatus}
+        shopApiTokenInput={shopApiTokenInput}
+        setShopApiTokenInput={setShopApiTokenInput}
+        saveShopApiToken={saveShopApiToken}
+        shopApiTokenSaving={shopApiTokenSaving}
+        adminContactLinks={adminContactLinks}
+        setAdminContactLinks={setAdminContactLinks}
+        saveContactLinks={saveContactLinks}
+        adminContactLinksSaving={adminContactLinksSaving}
+        expandedUserId={expandedUserId}
+        resetDeviceBindingForUser={resetDeviceBindingForUser}
+        toggleDeviceBinding={toggleDeviceBinding}
+        deleteUserAccount={deleteUserAccount}
+        deletingUserId={deletingUserId}
+      />
     );
   }
 
   if (user && !user.subscriptionActive) {
     return (
-      <div className="auth-page">
-        <section className="auth-card">
-          <h1>Подписка не активна</h1>
-          <p>
-            Напишите мне в тг
-            {' '}
-            <a href="https://t.me/alekseikb58" target="_blank" rel="noreferrer">
-              @alekseikb58
-            </a>{' '}
-            для активации аккаунта.
-          </p>
-          <div className="status">Статус: {formatSubscriptionStatusLabel(user)}</div>
-          <button type="button" className="ghost" onClick={() => handleLogout()}>
-            Выйти
-          </button>
-        </section>
-      </div>
+      <SubscriptionExpiredPage
+        user={user}
+        handleLogout={handleLogout}
+      />
     );
   }
 
   if (tsdOpen) {
     return (
-      <div className="tsd-page">
-        <header className={`scanner-shell tsd-scanner ${scanSuccessFlash ? 'scan-success-flash' : ''}`}>
-          <div
-            className={`scanner-viewport ${scannerOn ? 'active' : ''}`}
-            onClick={() => void focusScannerCamera()}
-            onDoubleClick={handleScannerDoubleClick}
-          >
-            <video
-              ref={videoRef}
-              autoPlay
-              muted
-              playsInline
-            />
-            <div className="scanner-guide" />
-          </div>
-          <div className="scanner-meta">
-            <span>{scannerStatus}</span>
-            <span className="scanner-last">{lastCode || 'ТСД'}</span>
-          </div>
-        </header>
-
-        <section className="tsd-result">
-          {!tsdResult ? <div className="status">Отсканируйте QR-код или штрихкод</div> : null}
-          {tsdResult ? (
-            <>
-              <div className="tsd-result-code">{tsdResult.raw || tsdResult.barcode}</div>
-              <div className="tsd-code-visuals">
-                {tsdQrDataUrl ? <img src={tsdQrDataUrl} alt="QR-код" /> : null}
-                {tsdBarcodeDataUrl ? <img src={tsdBarcodeDataUrl} alt="Штрихкод" /> : null}
-              </div>
-              <div className="tsd-result-meta">
-                <span>Штрихкод: {tsdResult.barcode}</span>
-                <span>Цена: {tsdResult.price}</span>
-                <span>Дата: {tsdResult.date}</span>
-              </div>
-            </>
-          ) : null}
-        </section>
-
-        <nav className="bottom-actions tsd-actions">
-          <button type="button" className={scannerOn ? 'active' : ''} onClick={toggleScanner}>
-            {scannerOn ? 'Остановить' : 'Сканер'}
-          </button>
-          <button type="button" className={torchOn ? 'active' : ''} onClick={toggleTorch}>Фонарик</button>
-          <button type="button" onClick={closeTsd}>Назад</button>
-        </nav>
-
-        {tsdPriceModalOpen ? (
-          <div className="modal-backdrop" onClick={() => setTsdPriceModalOpen(false)}>
-            <div className="modal-card" onClick={event => event.stopPropagation()}>
-              <h3>Цена товара</h3>
-              <div className="line mini">Штрихкод: {tsdResult?.barcode}</div>
-              <input
-                value={tsdPriceInput}
-                onChange={event => setTsdPriceInput(event.target.value)}
-                inputMode="decimal"
-                placeholder="00.00 или 00,00"
-                autoFocus
-              />
-              <button type="button" onClick={confirmTsdPrice}>Сформировать QR-код</button>
-              <button type="button" className="ghost" onClick={() => setTsdPriceModalOpen(false)}>Отмена</button>
-            </div>
-          </div>
-        ) : null}
-      </div>
+      <TsdPage
+        scanSuccessFlash={scanner.scanSuccessFlash}
+        scannerOn={scanner.scannerOn}
+        toggleScanner={scanner.toggleScanner}
+        torchOn={scanner.torchOn}
+        toggleTorch={scanner.toggleTorch}
+        videoRef={scanner.videoRef}
+        focusScannerCamera={scanner.focusScannerCamera}
+        handleScannerDoubleClick={scanner.handleScannerDoubleClick}
+        scannerStatus={scanner.scannerStatus}
+        lastCode={scanner.lastCode}
+        tsdResult={tsdResult}
+        tsdQrDataUrl={tsdQrDataUrl}
+        tsdBarcodeDataUrl={tsdBarcodeDataUrl}
+        closeTsd={closeTsd}
+        tsdPriceModalOpen={tsdPriceModalOpen}
+        setTsdPriceModalOpen={setTsdPriceModalOpen}
+        tsdPriceInput={tsdPriceInput}
+        setTsdPriceInput={setTsdPriceInput}
+        confirmTsdPrice={confirmTsdPrice}
+      />
     );
   }
 
   if (!activeRecount) {
     return (
-      <div className="home-page">
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept="application/pdf"
-          onChange={handleUpload}
-          className="hidden-file"
-        />
-
-        <header className="home-header">
-          <div>
-            <h2>Локалка</h2>
-            <p>Пользователь: {user?.login || '-'}</p>
-          </div>
-          <div className="home-header-actions">
-            <button type="button" className="ghost" onClick={openSettings}>Настройки</button>
-            <button type="button" onClick={() => handleLogout()} className="ghost">Выйти</button>
-          </div>
-        </header>
-
-        {error ? <section className="status error">{error}</section> : null}
-
-        <section className="panel">
-          <h3>Активный просчет</h3>
-          {homeLoading ? <div className="status">Загрузка...</div> : null}
-
-          {!homeLoading && activeSummary ? (
-            <div className="compact-card">
-              <div>Документ: {activeSummary.docId}</div>
-              <div>Позиции: {activeSummary.totalItems}</div>
-              <div>Расхождения: {activeSummary.mismatchCount}</div>
-              <button type="button" onClick={() => openRecount(activeSummary.id)}>Продолжить</button>
-            </div>
-          ) : null}
-
-          {!homeLoading && !activeSummary ? (
-            <div className="compact-card">
-              <div>Для начала нового просчета загрузите PDF-файл</div>
-              <button type="button" onClick={() => fileInputRef.current?.click()} disabled={loading}>
-                {loading ? 'Загрузка...' : 'Загрузить .PDF'}
-              </button>
-            </div>
-          ) : null}
-        </section>
-
-        <section className="panel">
-          <div className="home-history-head">
-            <h3>{homeTab === 'recounts' ? 'Завершенные локалки' : 'Патчноуты проекта'}</h3>
-            <div className="home-subtabs" role="tablist" aria-label="Разделы">
-              <button
-                type="button"
-                className={`home-subtab ${homeTab === 'recounts' ? 'active' : ''}`}
-                onClick={() => setHomeTab('recounts')}
-              >
-                Локалки
-              </button>
-              <button
-                type="button"
-                className={`home-subtab ${homeTab === 'patchnotes' ? 'active' : ''}`}
-                onClick={() => {
-                  setHomeTab('patchnotes');
-                  if (!patchNotes.length && !patchNotesLoading) {
-                    void refreshPatchNotes();
-                  }
-                }}
-              >
-                Патчноуты
-              </button>
-            </div>
-          </div>
-
-          {homeTab === 'recounts' ? (
-            <>
-              {!previousRecounts.length ? <div className="status">История пустая</div> : null}
-              <div className="history-list">
-                {previousRecounts.map(item => (
-                  <article key={item.id} className="history-item">
-                    <div className="history-item-head">
-                      <div>{item.groupName || 'Без названия группы'}</div>
-                      <button
-                        type="button"
-                        className="history-eye-btn"
-                        title="Открыть для доработки"
-                        aria-label="Открыть для доработки"
-                        onClick={() => reopenPreviousRecount(item.id)}
-                        disabled={loading}
-                      >
-                        👁
-                      </button>
-                    </div>
-                    <div className="line mini">Итог: {formatRub(item.totalSumRub)}</div>
-                    <div className="line mini">Дата начала: {formatStartDate(item.createdAt)}</div>
-                    <div className="line mini">Просчитывающий: {item.counterName || '-'}</div>
-                    <button
-                      type="button"
-                      className="danger history-delete-btn"
-                      onClick={() => deletePreviousRecount(item.id)}
-                      disabled={deletingRecountId === item.id}
-                    >
-                      {deletingRecountId === item.id ? 'Удаление...' : 'Удалить просчет'}
-                    </button>
-                  </article>
-                ))}
-              </div>
-            </>
-          ) : null}
-
-          {homeTab === 'patchnotes' ? (
-            <>
-              {patchNotesLoading ? <div className="status">Загрузка патчноутов...</div> : null}
-              {patchNotesError ? <div className="status error">{patchNotesError}</div> : null}
-              {!patchNotesLoading && !patchNotesError && !sortedPatchNotes.length ? (
-                <div className="status">Патчноуты пока не добавлены</div>
-              ) : null}
-              {!patchNotesLoading && !patchNotesError ? (
-                <div className="patchnote-list">
-                  {sortedPatchNotes.map(note => {
-                    const isExpanded = Boolean(expandedPatchNotes[note.id]);
-                    const hasLongText = note.text.length > PATCHNOTE_PREVIEW_LIMIT;
-                    const previewText = hasLongText && !isExpanded
-                      ? `${note.text.slice(0, PATCHNOTE_PREVIEW_LIMIT).trimEnd()}...`
-                      : note.text;
-
-                    return (
-                      <article key={note.id} className="patchnote-card">
-                        <div className="patchnote-date">{formatPatchNoteDate(note.date)}</div>
-                        <h4>{note.title}</h4>
-                        <p>{previewText}</p>
-                        {hasLongText ? (
-                          <button
-                            type="button"
-                            className="ghost patchnote-toggle"
-                            onClick={() => togglePatchNoteExpanded(note.id)}
-                          >
-                            {isExpanded ? 'Свернуть' : 'Читать далее'}
-                          </button>
-                        ) : null}
-                      </article>
-                    );
-                  })}
-                </div>
-              ) : null}
-            </>
-          ) : null}
-        </section>
-
-        <div className="home-tools-row">
-          <button type="button" className="tsd-home-btn" onClick={openTsd}>ТСД</button>
-        </div>
-
-        {settingsOpen ? (
-          <div className="modal-backdrop" onClick={closeSettings}>
-            <div className="modal-card" onClick={event => event.stopPropagation()}>
-              <h3>Настройки</h3>
-              <div className="line mini">Подписка: {formatSubscriptionStatusLabel(user)}</div>
-              <label className="settings-field">
-                Просчитывающий по умолчанию
-                <input
-                  value={defaultCounterNameInput}
-                  onChange={event => setDefaultCounterNameInput(event.target.value)}
-                  placeholder="Имя, которое будет подставляться автоматически"
-                />
-              </label>
-              <label className="checkbox-row">
-                <input
-                  type="checkbox"
-                  checked={feedbackSoundEnabled}
-                  onChange={event => setFeedbackSoundEnabled(event.target.checked)}
-                />
-                Звук сканера и клавиш
-              </label>
-              <button type="button" onClick={saveAccountSettings} disabled={settingsSaving}>
-                {settingsSaving ? 'Сохранение...' : 'Сохранить'}
-              </button>
-              <button type="button" className="ghost" onClick={closeSettings}>Закрыть</button>
-            </div>
-          </div>
-        ) : null}
-      </div>
+      <HomePage
+        fileInputRef={fileInputRef}
+        handleUpload={handleUpload}
+        user={user}
+        openSettings={openSettings}
+        handleLogout={handleLogout}
+        error={error}
+        homeLoading={homeLoading}
+        activeSummary={activeSummary}
+        openRecount={openRecount}
+        loading={loading}
+        homeTab={homeTab}
+        setHomeTab={setHomeTab}
+        previousRecounts={previousRecounts}
+        reopenPreviousRecount={reopenPreviousRecount}
+        deletePreviousRecount={deletePreviousRecount}
+        deletingRecountId={deletingRecountId}
+        patchNotesLoading={patchNotesLoading}
+        patchNotesError={patchNotesError}
+        patchNotes={patchNotes}
+        refreshPatchNotes={refreshPatchNotes}
+        sortedPatchNotes={sortedPatchNotes}
+        expandedPatchNotes={expandedPatchNotes}
+        togglePatchNoteExpanded={togglePatchNoteExpanded}
+        openTsd={openTsd}
+        settingsOpen={settingsOpen}
+        closeSettings={closeSettings}
+        defaultCounterNameInput={defaultCounterNameInput}
+        setDefaultCounterNameInput={setDefaultCounterNameInput}
+        feedbackSoundEnabled={feedbackSoundEnabled}
+        setFeedbackSoundEnabled={setFeedbackSoundEnabled}
+        saveAccountSettings={saveAccountSettings}
+        settingsSaving={settingsSaving}
+      />
     );
   }
 
   return (
-    <div className="recount-page">
-      <div className="recount-top">
-        <header className={`scanner-shell ${scanSuccessFlash ? 'scan-success-flash' : ''}`}>
-          <div
-            className={`scanner-viewport ${scannerOn ? 'active' : ''}`}
-            onClick={() => void focusScannerCamera()}
-            onDoubleClick={handleScannerDoubleClick}
-          >
-            <video
-              ref={videoRef}
-              autoPlay
-              muted
-              playsInline
-            />
-            <div className="scanner-guide" />
-          </div>
-          <div className="scanner-meta">
-            <span>{loading ? 'Подождите...' : scannerStatus}</span>
-            <span className="scanner-last">
-              {`${formatRub(progressSummary.totalSum)} | ${progressSummary.progressPercent}%`}
-            </span>
-          </div>
-          {unresolvedBarcode ? (
-            <div className="scanner-unresolved">
-              <span>
-                {candidateCodes.length > 1
-                  ? `Штрихкод ${unresolvedBarcode}: несколько вариантов товара`
-                  : `Штрихкод ${unresolvedBarcode} не найден`}
-              </span>
-              <button type="button" onClick={openBindModal}>
-                {candidateCodes.length > 1 ? 'Выбрать товар' : 'Привязать вручную'}
-              </button>
-            </div>
-          ) : null}
-          {bindTargetBarcode && !unresolvedBarcode ? (
-            <div className="scanner-unresolved">
-              <span>Текущий штрихкод: {bindTargetBarcode}</span>
-              <button type="button" onClick={openBindModal}>Ручная привязка</button>
-            </div>
-          ) : null}
-          {hiddenCompletedMatch && !unresolvedBarcode ? (
-            <div className="scanner-unresolved">
-              <span>Позиция найдена, но она скрыта, потому что уже отошла.</span>
-            </div>
-          ) : null}
-        </header>
-
-        <section className="search-block">
-          <input
-            value={search}
-            onChange={event => setSearch(event.target.value)}
-            placeholder="Поиск по артикулу или названию"
-          />
-          {search ? (
-            <button
-              type="button"
-              className="search-clear-btn"
-              aria-label="Очистить поиск"
-              onClick={() => setSearch('')}
-            >
-              ✕
-            </button>
-          ) : null}
-        </section>
-
-        {error ? <section className="status error">{error}</section> : null}
-      </div>
-
-      <main ref={itemsFeedRef} className={`items-feed ${activeFactCode ? 'keypad-open' : ''}`}>
-        {filteredItems.map(item => {
-          const row = computeRowState(item, values);
-          const packageType = detectPackageType(item.name);
-
-          return (
-            <article
-              key={item.code}
-              ref={card => {
-                if (card) itemCardRefs.current.set(item.code, card);
-                else itemCardRefs.current.delete(item.code);
-              }}
-              className={`item-card ${row.status}`}
-            >
-              <div className="line">{item.name}</div>
-              <div className="line mini">
-                <strong>Ед:</strong>{' '}
-                <span
-                  className={`pack-icon ${packageType}`}
-                  title={getPackageTypeLabel(packageType)}
-                  aria-label={getPackageTypeLabel(packageType)}
-                />
-                <span>{item.unit || '—'}</span>
-                {' '}| <strong>Цена:</strong> {item.price ?? '—'}
-                {' '}| <strong>Код:</strong> {item.code}
-              </div>
-              <div className="line mini"><strong>По документам:</strong> {item.docQty ?? '—'} | <strong>Разница:</strong> {row.delta === null ? '—' : row.delta}</div>
-              <input
-                className={`fact-input ${activeFactCode === item.code ? 'active' : ''}`}
-                value={row.raw}
-                onChange={event => updateFact(item.code, event.target.value)}
-                onFocus={() => handleFactFocus(item.code)}
-                onClick={() => handleFactFocus(item.code)}
-                onBlur={handleFactBlur}
-                readOnly
-                type="text"
-                inputMode="none"
-                pattern="[0-9+]*"
-                placeholder="Фактическое количество"
-              />
-            </article>
-          );
-        })}
-      </main>
-
-      <div className={`menu-popup ${menuOpen ? 'open' : ''}`}>
-        <button type="button" onClick={handleSaveNow}>Сохранить сейчас</button>
-        <button type="button" onClick={() => {
-          setMismatchFilter('all');
-          setMismatchModalOpen(true);
-          setMenuOpen(false);
-        }}>
-          Расхождения ({mismatchItems.length})
-        </button>
-        <button
-          type="button"
-          className={hideCompletedItems ? 'active' : ''}
-          onClick={() => setHideCompletedItems(prev => !prev)}
-        >
-          {hideCompletedItems ? 'Показывать отошедшее' : 'Скрыть отошедшее'}
-        </button>
-        <button type="button" onClick={() => {
-          openCompleteModal();
-          setMenuOpen(false);
-        }}>
-          Завершить
-        </button>
-        <button type="button" onClick={handleFinishWithoutPdf} disabled={loading}>
-          Завершить без PDF
-        </button>
-        <button type="button" onClick={goHome}>На главный</button>
-        <button type="button" className="danger" onClick={deleteActiveRecount} disabled={deletingRecountId === activeRecount?.id}>
-          {deletingRecountId === activeRecount?.id ? 'Удаление...' : 'Удалить просчет'}
-        </button>
-      </div>
-
-      <nav className="bottom-actions">
-        <button type="button" className={scannerOn ? 'active' : ''} onClick={toggleScanner}>Сканер</button>
-        <button type="button" className={torchOn ? 'active' : ''} onClick={toggleTorch}>Фонарик</button>
-        <button type="button" className={menuOpen ? 'active' : ''} onClick={() => setMenuOpen(prev => !prev)}>Меню</button>
-      </nav>
-
-      {activeFactCode ? (
-        <FactKeypad
-          ref={keypadRef}
-          value={values[activeFactCode] || ''}
-          onAppend={appendToActiveFact}
-          onErase={eraseActiveFact}
-          onKeepOpen={keepFactKeypadOpen}
-        />
-      ) : null}
-
-      {mismatchModalOpen ? (
-        <div className="modal-backdrop" onClick={() => setMismatchModalOpen(false)}>
-          <div className="modal-card" onClick={event => event.stopPropagation()}>
-            <h3>Позиции с расхождениями</h3>
-            <div className="mismatch-filters">
-              <button
-                type="button"
-                className={mismatchFilter === 'all' ? 'active' : 'ghost'}
-                onClick={() => setMismatchFilter('all')}
-              >
-                Все
-              </button>
-              <button
-                type="button"
-                className={mismatchFilter === 'missing' ? 'active' : 'ghost'}
-                onClick={() => setMismatchFilter('missing')}
-              >
-                Пропущено
-              </button>
-            </div>
-            {!mismatchItems.length ? <div className="status">Расхождений нет</div> : null}
-            {mismatchItems.length ? (
-              <div className="compact-table-wrap">
-                <table className="compact-table">
-                  <colgroup>
-                    <col className="col-name" />
-                    <col className="col-num" />
-                    <col className="col-num" />
-                    <col className="col-num" />
-                  </colgroup>
-                  <thead>
-                    <tr>
-                      <th>Название</th>
-                      <th>Остаток</th>
-                      <th>Факт</th>
-                      <th>Разница</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {mismatchItems.map(item => {
-                      const factClass = item.delta === null ? 'num-neutral' : item.delta < 0 ? 'num-negative' : 'num-positive';
-                      const deltaClass = item.delta === null ? 'num-neutral' : item.delta < 0 ? 'num-negative' : 'num-positive';
-                      const deltaText = item.delta === null ? '-' : `${item.delta > 0 ? '+' : ''}${item.delta}`;
-                      const factText = item.fact === null ? '-' : String(item.fact);
-
-                      return (
-                        <tr key={item.code}>
-                          <td className="cell-name">{item.name}</td>
-                          <td>{item.docQty ?? '-'}</td>
-                          <td className={factClass}>{factText}</td>
-                          <td className={deltaClass}>{deltaText}</td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            ) : null}
-            <button type="button" onClick={() => setMismatchModalOpen(false)}>Закрыть</button>
-          </div>
-        </div>
-      ) : null}
-
-      {completeModalOpen ? (
-        <div className="modal-backdrop" onClick={() => setCompleteModalOpen(false)}>
-          <div className="modal-card" onClick={event => event.stopPropagation()}>
-            <h3>Завершение просчета</h3>
-            <input
-              value={counterName}
-              onChange={event => setCounterName(event.target.value)}
-              placeholder="Просчитывающий"
-            />
-            <input
-              value={groupName}
-              onChange={event => setGroupName(event.target.value)}
-              placeholder="Товарная группа"
-            />
-            <label className="checkbox-row">
-              <input
-                type="checkbox"
-                checked={includeTotalSummary}
-                onChange={event => setIncludeTotalSummary(event.target.checked)}
-              />
-              Свести -/+
-            </label>
-            <label className="checkbox-row">
-              <input
-                type="checkbox"
-                checked={includeDiscrepancyTable}
-                onChange={event => setIncludeDiscrepancyTable(event.target.checked)}
-              />
-              Таблица расхождений
-            </label>
-            {activeRecount?.completedAt ? (
-              <label className="checkbox-row">
-                <input
-                  type="checkbox"
-                  checked={updateCompletionTime}
-                  onChange={event => setUpdateCompletionTime(event.target.checked)}
-                />
-                Обновить время просчета
-              </label>
-            ) : null}
-            <button type="button" onClick={handleCompleteRecount} disabled={loading}>Скачать итоговый PDF и завершить</button>
-            <button type="button" className="ghost" onClick={() => setCompleteModalOpen(false)}>Отмена</button>
-          </div>
-        </div>
-      ) : null}
-
-      {bindModalOpen ? (
-        <div className="modal-backdrop" onClick={closeBindModal}>
-          <div className="modal-card" onClick={event => event.stopPropagation()}>
-            <h3>Привязать штрихкод {bindTargetBarcode || unresolvedBarcode}</h3>
-            {candidateItems.length ? (
-              <>
-                <div className="line mini">Ранее встречались варианты:</div>
-                <div className="bind-item-list">
-                  {candidateItems.map(item => (
-                    <button
-                      key={`candidate-${item.code}`}
-                      type="button"
-                      className="bind-item-row"
-                      onClick={() => void bindBarcodeToSelectedItem(item.code)}
-                    >
-                      <span className="bind-item-code">{item.code}</span>
-                      <span className="bind-item-name">{item.name}</span>
-                    </button>
-                  ))}
-                </div>
-              </>
-            ) : null}
-            <input
-              value={bindSearch}
-              onChange={event => setBindSearch(event.target.value)}
-              placeholder="Найдите товар по артикулу или названию"
-              autoFocus
-            />
-            <div className="bind-item-list">
-              {!bindFilteredItems.length ? <div className="status">Товары не найдены</div> : null}
-              {bindFilteredItems.map(item => (
-                <button
-                  key={item.code}
-                  type="button"
-                  className="bind-item-row"
-                  onClick={() => void bindBarcodeToSelectedItem(item.code)}
-                >
-                  <span className="bind-item-code">{item.code}</span>
-                  <span className="bind-item-name">{item.name}</span>
-                </button>
-              ))}
-            </div>
-            <button type="button" className="ghost" onClick={closeBindModal}>Отмена</button>
-          </div>
-        </div>
-      ) : null}
-    </div>
+    <RecountPage
+      scanSuccessFlash={scanner.scanSuccessFlash}
+      scannerOn={scanner.scannerOn}
+      toggleScanner={scanner.toggleScanner}
+      torchOn={scanner.torchOn}
+      toggleTorch={scanner.toggleTorch}
+      videoRef={scanner.videoRef}
+      focusScannerCamera={scanner.focusScannerCamera}
+      handleScannerDoubleClick={scanner.handleScannerDoubleClick}
+      loading={loading}
+      scannerStatus={scanner.scannerStatus}
+      progressSummary={progressSummary}
+      unresolvedBarcode={unresolvedBarcode}
+      candidateCodes={candidateCodes}
+      openBindModal={openBindModal}
+      bindTargetBarcode={bindTargetBarcode}
+      hiddenCompletedMatch={hiddenCompletedMatch}
+      search={search}
+      setSearch={setSearch}
+      error={error}
+      itemsFeedRef={itemsFeedRef}
+      activeFactCode={activeFactCode}
+      filteredItems={filteredItems}
+      computeRowState={computeRowState}
+      values={values}
+      itemCardRefs={itemCardRefs}
+      updateFact={updateFact}
+      handleFactFocus={handleFactFocus}
+      handleFactBlur={handleFactBlur}
+      menuOpen={menuOpen}
+      setMenuOpen={setMenuOpen}
+      handleSaveNow={handleSaveNow}
+      mismatchFilter={mismatchFilter}
+      setMismatchFilter={setMismatchFilter}
+      mismatchModalOpen={mismatchModalOpen}
+      setMismatchModalOpen={setMismatchModalOpen}
+      hideCompletedItems={hideCompletedItems}
+      setHideCompletedItems={setHideCompletedItems}
+      mismatchItems={mismatchItems}
+      openCompleteModal={openCompleteModal}
+      handleFinishWithoutPdf={handleFinishWithoutPdf}
+      goHome={goHome}
+      deleteActiveRecount={deleteActiveRecount}
+      deletingRecountId={deletingRecountId}
+      activeRecount={activeRecount}
+      keypadRef={keypadRef}
+      appendToActiveFact={appendToActiveFact}
+      eraseActiveFact={eraseActiveFact}
+      keepFactKeypadOpen={keepFactKeypadOpen}
+      completeModalOpen={completeModalOpen}
+      setCompleteModalOpen={setCompleteModalOpen}
+      counterName={counterName}
+      setCounterName={setCounterName}
+      groupName={groupName}
+      setGroupName={setGroupName}
+      includeTotalSummary={includeTotalSummary}
+      setIncludeTotalSummary={setIncludeTotalSummary}
+      includeDiscrepancyTable={includeDiscrepancyTable}
+      setIncludeDiscrepancyTable={setIncludeDiscrepancyTable}
+      updateCompletionTime={updateCompletionTime}
+      setUpdateCompletionTime={setUpdateCompletionTime}
+      handleCompleteRecount={handleCompleteRecount}
+      bindModalOpen={bindModalOpen}
+      closeBindModal={closeBindModal}
+      candidateItems={candidateItems}
+      bindBarcodeToSelectedItem={bindBarcodeToSelectedItem}
+      bindSearch={bindSearch}
+      setBindSearch={setBindSearch}
+      bindFilteredItems={bindFilteredItems}
+    />
   );
 }

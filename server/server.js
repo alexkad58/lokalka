@@ -89,6 +89,7 @@ const ensureAdminUser = () => usersService.ensureAdminUser();
 const hasActiveSubscription = user => usersService.hasActiveSubscription(user);
 const buildSubscriptionStatus = user => usersService.buildSubscriptionStatus(user);
 const publicUser = user => usersService.publicUser(user);
+const getSupportLinks = () => usersService.getSupportLinks();
 
 const normalizeSession = item => ({
   token: String(item?.token || '').trim(),
@@ -120,6 +121,12 @@ const {
   getLogs
 } = auditLogService;
 
+const tokenState = {
+  accessToken: SHOP_API_ACCESS_TOKEN,
+  refreshToken: SHOP_API_REFRESH_TOKEN,
+  updatedAt: Date.now()
+};
+
 const databaseStore = createJsonStore({
   fileUrl: DATA_FILE_URL,
   normalizeUser: user => ({
@@ -133,6 +140,9 @@ const databaseStore = createJsonStore({
   onLoad: state => {
     if (state.settings.shopApiAccessToken) {
       tokenState.accessToken = String(state.settings.shopApiAccessToken).trim();
+    }
+    if (state.settings.shopApiRefreshToken) {
+      tokenState.refreshToken = String(state.settings.shopApiRefreshToken).trim();
     }
     return ensureAdminUser() || hydrateSessionsFromDb();
   },
@@ -165,11 +175,7 @@ const patchNotesStore = createPatchNotesStore({
   fileUrl: PATCH_NOTES_FILE_URL,
   normalizePatchNote: normalizePatchNoteRecord
 });
-const tokenState = {
-  accessToken: SHOP_API_ACCESS_TOKEN,
-  refreshToken: SHOP_API_REFRESH_TOKEN,
-  updatedAt: Date.now()
-};
+
 const shopApiService = createShopApiService({
   shopApi: {
     url: SHOP_API_URL,
@@ -182,6 +188,24 @@ const shopApiService = createShopApiService({
     shopId: SHOP_API_SHOP_ID
   },
   tokenState,
+  onTokenUpdate: async ({ accessToken, refreshToken }) => {
+    let changed = false;
+    if (accessToken !== undefined && db.settings.shopApiAccessToken !== accessToken) {
+      db.settings.shopApiAccessToken = accessToken;
+      changed = true;
+    }
+    if (refreshToken !== undefined && db.settings.shopApiRefreshToken !== refreshToken) {
+      db.settings.shopApiRefreshToken = refreshToken;
+      changed = true;
+    }
+    if (changed) {
+      try {
+        await databaseStore.save(db);
+      } catch (err) {
+        logEvent('error', 'shop-api-token-save-failed', { message: err?.message || String(err) });
+      }
+    }
+  },
   cache: barcodeResolutionCache,
   persistCache: () => barcodeCacheStore.persist(),
   logEvent,
@@ -435,7 +459,8 @@ app.register(createAdminRoutes({
   getLogs,
   tokenState,
   shopApiService,
-  sessions
+  sessions,
+  getSupportLinks
 }));
 app.register(createBarcodeRoutes({
   authenticate,

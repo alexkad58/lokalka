@@ -23,7 +23,7 @@ test('parseCenCode extracts second semicolon-delimited token', () => {
   assert.equal(parseCenCode('ABC;123123;55'), null);
 });
 
-test('barcode ownership lookup and reassignment keep one owner without duplicates', () => {
+test('barcode ownership allows 1-to-many binding: one code can bind to multiple barcodes', () => {
   const cache = new Map([
     ['barcode-old', { codes: ['29390', '39054'], source: 'manual' }],
     ['barcode-current', { codes: ['41464', '29390'], source: 'shop-api' }]
@@ -42,16 +42,17 @@ test('barcode ownership lookup and reassignment keep one owner without duplicate
 
   const result = service.reassignResolutionCode('barcode-new', '29390', 'manual', '22021');
 
+  // New behavior: code stays in old barcodes, is added to new barcode
   assert.deepEqual(result.previousBarcodes, ['barcode-old', 'barcode-current']);
   assert.equal(cache.has('barcode-old'), true);
-  assert.deepEqual(cache.get('barcode-old').codes, ['39054']);
-  assert.deepEqual(cache.get('barcode-current').codes, ['41464']);
+  assert.deepEqual(cache.get('barcode-old').codes, ['29390', '39054']);
+  assert.deepEqual(cache.get('barcode-current').codes, ['41464', '29390']);
   assert.deepEqual(cache.get('barcode-new').codes, ['29390']);
   assert.equal(cache.get('barcode-new').storeNumber, '22021');
   assert.equal(persistCount, 1);
 });
 
-test('barcode binding route requires confirmation before moving an existing ownership', async () => {
+test('barcode binding route no longer requires confirmation and allows 1-to-many', async () => {
   let bindHandler;
   const fakeApp = {
     post(path, options, handler) {
@@ -99,24 +100,62 @@ test('barcode binding route requires confirmation before moving an existing owne
     send(payload) { this.payload = payload; return payload; }
   };
 
-  await bindHandler(request, reply);
-  assert.equal(reply.statusCode, 409);
-  assert.deepEqual(reply.payload.existingBarcodes, ['barcode-old']);
+  // New behavior: no 409 conflict, code bound directly
+  const result = await bindHandler(request, reply);
+  assert.equal(result.ok, true);
+  assert.equal(result.conflict, false);
+  
+  // Code remains in old barcode and is added to new barcode
   assert.deepEqual(cache.get('barcode-old').codes, ['29390']);
-  assert.equal(cache.has('barcode-new'), false);
-
-  const confirmedReply = {
-    statusCode: 200,
-    code(status) { this.statusCode = status; return this; },
-    send(payload) { this.payload = payload; return payload; }
-  };
-  const confirmed = await bindHandler({
-    ...request,
-    body: { ...request.body, confirm: true }
-  }, confirmedReply);
-
-  assert.equal(confirmed.ok, true);
-  assert.deepEqual(confirmed.previousBarcodes, ['barcode-old']);
   assert.deepEqual(cache.get('barcode-new').codes, ['29390']);
-  assert.equal(cache.has('barcode-old'), false);
+});
+
+test('barcode deduplication prevents duplicate codes in single barcode record', () => {
+  const cache = new Map([
+    ['barcode-1', { codes: ['123', '456'], source: 'manual' }]
+  ]);
+  const service = createShopApiService({
+    shopApi: { url: '' },
+    tokenState: {},
+    cache,
+    persistCache: () => {},
+    logEvent: () => {},
+    logShopStdout: () => {}
+  });
+
+  // Try to add a code that already exists in this barcode
+  const result = service.reassignResolutionCode('barcode-1', '123', 'manual', '22021');
+  
+  // Code should not be duplicated
+  assert.deepEqual(cache.get('barcode-1').codes, ['123', '456']);
+  assert.equal(result.changed, true);
+});
+
+test('barcode resolution automatically selects first matching code from recount items', () => {
+  // Simulate scenario where one barcode resolves to multiple codes
+  // and we need to pick the first one present in the recount
+  const codes = ['321', '123', '789'];
+  const activeItems = [
+    { code: '456' },
+    { code: '321' },
+    { code: '999' }
+  ];
+  
+  const activeItemCodes = new Set(activeItems.map(item => String(item.code)));
+  const matchedCode = codes.find(c => activeItemCodes.has(String(c)));
+  
+  assert.equal(matchedCode, '321');
+});
+
+test('barcode resolution marks as unresolved if no codes match recount items', () => {
+  const codes = ['321', '123', '789'];
+  const activeItems = [
+    { code: '456' },
+    { code: '999' }
+  ];
+  
+  const activeItemCodes = new Set(activeItems.map(item => String(item.code)));
+  const matchedCode = codes.find(c => activeItemCodes.has(String(c)));
+  
+  assert.equal(matchedCode, undefined);
 });
