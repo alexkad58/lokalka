@@ -30,29 +30,12 @@ export function createBarcodeRoutes({
         return reply.code(400).send({ ok: false, error: 'Код товара отсутствует в просчете' });
       }
 
-      const existingBarcodes = shopApiService.findBarcodesForCode(itemCode, barcode);
-      if (existingBarcodes.length && body.confirm !== true) {
-        logEvent('info', 'bind-barcode-conflict', buildRequestLogMeta(request, {
-          barcode,
-          itemCode,
-          existingBarcodes
-        }));
-        return reply.code(409).send({
-          ok: false,
-          conflict: true,
-          barcode,
-          itemCode,
-          existingBarcodes,
-          error: `Код товара уже привязан к штрихкоду ${existingBarcodes.join(', ')}`
-        });
-      }
-
+      // Note: We now allow one code to be bound to multiple barcodes (1-to-many relationship)
       const result = shopApiService.reassignResolutionCode(barcode, itemCode, 'manual', storeNumber);
       logEvent('info', 'bind-barcode-success', buildRequestLogMeta(request, {
         barcode,
         itemCode,
-        previousBarcodes: result.previousBarcodes,
-        confirmed: body.confirm === true
+        previousBarcodes: result.previousBarcodes
       }));
       return {
         ok: true,

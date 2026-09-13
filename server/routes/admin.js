@@ -11,8 +11,18 @@ export function createAdminRoutes({
   getLogs,
   tokenState,
   shopApiService,
-  sessions
+  sessions,
+  getSupportLinks
 }) {
+  function normalizeSupportUrl(value, fallback) {
+    const raw = String(value || '').trim();
+    if (!raw) return fallback;
+    if (/^https?:\/\//i.test(raw)) return raw;
+    if (raw.startsWith('@')) return `https://t.me/${raw.slice(1)}`;
+    if (raw.startsWith('t.me/')) return `https://${raw}`;
+    return fallback;
+  }
+
   return async function adminRoutes(app) {
     app.get('/api/admin/users', { preHandler: [authenticate, requireAdmin] }, async () => ({
       ok: true,
@@ -43,14 +53,40 @@ export function createAdminRoutes({
       tokenUpdatedAt: tokenState.updatedAt
     }));
 
+    app.get('/api/admin/contact-links', { preHandler: [authenticate, requireAdmin] }, async () => ({
+      ok: true,
+      links: getSupportLinks()
+    }));
+
+    app.post('/api/admin/contact-links', { preHandler: [authenticate, requireAdmin] }, async (request, reply) => {
+      const body = request.body && typeof request.body === 'object' ? request.body : {};
+      const current = getSupportLinks();
+      const next = {
+        telegramUrl: normalizeSupportUrl(body.telegramUrl, current.telegramUrl),
+        maxUrl: normalizeSupportUrl(body.maxUrl, current.maxUrl)
+      };
+
+      db.settings.contactLinks = next;
+      await saveDb();
+      logEvent('info', 'admin-contact-links-updated', buildRequestLogMeta(request, {
+        telegramUrl: next.telegramUrl,
+        maxUrl: next.maxUrl
+      }));
+
+      return { ok: true, links: next };
+    });
+
     app.post('/api/admin/shop-api', { preHandler: [authenticate, requireAdmin] }, async (request, reply) => {
       const body = request.body && typeof request.body === 'object' ? request.body : {};
-      const token = String(body.token || '').trim();
+      const token = String(body.token || '').trim().replace(/^Bearer\s+/i, '').trim();
+      const refreshToken = String(body.refreshToken || '').trim();
       if (!token) return reply.code(400).send({ ok: false, error: 'Укажите токен API магазина' });
 
       tokenState.accessToken = token;
+      if (refreshToken) tokenState.refreshToken = refreshToken;
       tokenState.updatedAt = Date.now();
       db.settings.shopApiAccessToken = token;
+      if (refreshToken) db.settings.shopApiRefreshToken = refreshToken;
       await saveDb();
       logEvent('warn', 'admin-shop-api-token-updated', buildRequestLogMeta(request, {
         tokenLast5: shopApiService.lastTokenChars(token)

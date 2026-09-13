@@ -186,6 +186,27 @@ test('admin token settings never return the full token', async () => {
   assert.equal(responseJson(readResponse).token, undefined);
 });
 
+test('admin can update contact links and they are exposed to users', async () => {
+  const saveResponse = await jsonRequest(
+    'POST',
+    '/api/admin/contact-links',
+    { telegramUrl: 'https://t.me/alpha', maxUrl: 'https://max.example.com' },
+    authHeaders(adminToken, 'admin-device')
+  );
+  assert.equal(saveResponse.statusCode, 200);
+  assert.equal(responseJson(saveResponse).links.telegramUrl, 'https://t.me/alpha');
+  assert.equal(responseJson(saveResponse).links.maxUrl, 'https://max.example.com');
+
+  const meResponse = await app.inject({
+    method: 'GET',
+    url: '/api/auth/me',
+    headers: authHeaders(userToken, 'device-b')
+  });
+  assert.equal(meResponse.statusCode, 200);
+  assert.equal(responseJson(meResponse).user.supportLinks.telegramUrl, 'https://t.me/alpha');
+  assert.equal(responseJson(meResponse).user.supportLinks.maxUrl, 'https://max.example.com');
+});
+
 test('patch notes support authorized read and admin CRUD with validation', async () => {
   const unauthorizedRead = await app.inject({ method: 'GET', url: '/api/patchnotes' });
   assert.equal(unauthorizedRead.statusCode, 401);

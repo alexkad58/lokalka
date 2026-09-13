@@ -58,6 +58,26 @@ function hasResultRefreshedTokenFlag(payload) {
   return payload?.result?.refreshed_token === true;
 }
 
+function extractResponseTokens(response, payload, shopApi) {
+  const headerAccess = getHeaderToken(response, shopApi.tokenHeader)
+    || getHeaderToken(response, 'Authorization')
+    || getHeaderToken(response, 'AuthorizationX')
+    || getHeaderToken(response, 'X-Access-Token')
+    || getHeaderToken(response, 'X-Token');
+
+  const headerRefresh = getHeaderToken(response, shopApi.refreshHeader)
+    || getHeaderToken(response, 'X-Refresh-Token')
+    || getHeaderToken(response, 'Refresh-Token');
+
+  const payloadTokens = extractTokenData(payload);
+
+  return {
+    accessToken: headerAccess || payloadTokens.accessToken || null,
+    refreshToken: headerRefresh || payloadTokens.refreshToken || null,
+    refreshed: payloadTokens.refreshed || hasResultRefreshedTokenFlag(payload)
+  };
+}
+
 function createHeaderReader(rawHeaders) {
   const store = new Map();
   for (const [name, value] of Object.entries(rawHeaders || {})) {
@@ -136,6 +156,7 @@ async function sendShopApiRequest(url, options = {}) {
 export function createShopApiService({
   shopApi,
   tokenState,
+  onTokenUpdate,
   cache,
   persistCache,
   logEvent,
@@ -151,6 +172,18 @@ export function createShopApiService({
     if (accessChanged || refreshChanged) {
       tokenState.updatedAt = Date.now();
       logEvent('info', 'shop-api-token-state-updated', { accessChanged, refreshChanged });
+      if (typeof onTokenUpdate === 'function') {
+        try {
+          Promise.resolve(onTokenUpdate({
+            accessToken: accessChanged ? accessToken : undefined,
+            refreshToken: refreshChanged ? refreshToken : undefined
+          })).catch(err => {
+            logEvent('error', 'shop-api-on-token-update-failed', { message: err?.message || String(err) });
+          });
+        } catch (err) {
+          logEvent('error', 'shop-api-on-token-update-failed', { message: err?.message || String(err) });
+        }
+      }
     }
     return { changed: accessChanged || refreshChanged, accessChanged, refreshChanged };
   }
@@ -187,19 +220,16 @@ export function createShopApiService({
     try {
       let response = await requestShop();
       let payload = await parseJson(response);
-      const headerAccess = getHeaderToken(response, shopApi.tokenHeader);
-      const headerRefresh = getHeaderToken(response, shopApi.refreshHeader);
-      const payloadTokens = extractTokenData(payload);
-      const refreshed = hasResultRefreshedTokenFlag(payload);
-      const tokenUpdate = updateTokenState({ accessToken: headerAccess, refreshToken: headerRefresh || payloadTokens.refreshToken });
-      if (response.status === 401 || (response.status === 205 && refreshed)) {
-        logEvent('info', 'shop-api-retry', { reason: response.status === 401 ? '401' : '205-with-token-refresh' });
+
+      const tokens = extractResponseTokens(response, payload, shopApi);
+      updateTokenState({ accessToken: tokens.accessToken, refreshToken: tokens.refreshToken });
+
+      if (response.status === 401 || response.status === 403 || (response.status === 205 && tokens.refreshed)) {
+        logEvent('info', 'shop-api-retry', { reason: `${response.status}-retry`, refreshed: tokens.refreshed, hasUpdatedToken: Boolean(tokens.accessToken || tokens.refreshToken) });
         response = await requestShop();
         payload = await parseJson(response);
-        updateTokenState({
-          accessToken: getHeaderToken(response, shopApi.tokenHeader),
-          refreshToken: getHeaderToken(response, shopApi.refreshHeader) || extractTokenData(payload).refreshToken
-        });
+        const retryTokens = extractResponseTokens(response, payload, shopApi);
+        updateTokenState({ accessToken: retryTokens.accessToken, refreshToken: retryTokens.refreshToken });
       }
       const locationCode = extractArticleCodeFromLocationHeader(response);
       const payloadCode = extractArticleCode(payload);
@@ -243,32 +273,20 @@ export function createShopApiService({
     }
 
     const previousBarcodes = findBarcodesForCode(normalizedCode, normalizedBarcode);
-    const nextCache = new Map();
-
-    for (const [mappedBarcode, record] of cache.entries()) {
-      const codes = (record?.codes || []).map(String).filter(itemCode => itemCode !== normalizedCode);
-      if (codes.length) {
-        nextCache.set(mappedBarcode, {
-          ...record,
-          codes: Array.from(new Set(codes))
-        });
-      }
-    }
-
+    
+    // Don't modify other barcodes - just add code to target barcode with deduplication
     const current = cache.get(normalizedBarcode);
-    const currentCodes = (current?.codes || []).map(String).filter(itemCode => itemCode !== normalizedCode);
-    nextCache.set(normalizedBarcode, {
+    const currentCodes = (current?.codes || []).map(String);
+    const codesSet = new Set(currentCodes);
+    codesSet.add(normalizedCode);
+    
+    cache.set(normalizedBarcode, {
       ...(current || {}),
-      codes: Array.from(new Set([...currentCodes, normalizedCode])),
+      codes: Array.from(codesSet),
       source,
       storeNumber: String(storeNumber || current?.storeNumber || '').trim(),
       updatedAt: Date.now()
     });
-
-    cache.clear();
-    for (const [mappedBarcode, record] of nextCache.entries()) {
-      cache.set(mappedBarcode, record);
-    }
     persistCache();
 
     return { changed: true, barcode: normalizedBarcode, code: normalizedCode, previousBarcodes };
