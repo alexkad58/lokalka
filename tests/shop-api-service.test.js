@@ -60,6 +60,10 @@ test('shop API service builds article lookup URLs and normalizes product payload
     service.buildProductLookupUrl('A-100', 'store-9'),
     'https://shop.test/products/A-100?city_id=7&shop_id=store-9'
   );
+  assert.equal(
+    service.buildShopProductUrl('A-100', 'store-9'),
+    'https://shop.test/products/A-100?city_id=7&shop_id=store-9'
+  );
 
   const normalized = service.normalizeProductPayload({
     success: true,
@@ -84,6 +88,34 @@ test('shop API service builds article lookup URLs and normalizes product payload
   assert.equal(normalized.product.productId, 'A-100');
   assert.equal(normalized.product.name, 'Вода 1л');
   assert.equal(normalized.product.imgPreview, 'https://img.test/preview.jpg');
+});
+
+test('shop API service removes barcode path for article product lookups', () => {
+  const service = createShopApiService({
+    shopApi: {
+      url: 'https://shop.test/api/v1/products/barcode/',
+      method: 'GET',
+      tokenHeader: 'Authorization',
+      refreshHeader: '',
+      tokenPrefix: 'Bearer',
+      cityId: '7',
+      shopId: 'shop-22'
+    },
+    tokenState: { accessToken: 'token', refreshToken: '', updatedAt: 0 },
+    cache: new Map(),
+    persistCache: () => {},
+    logEvent: () => {},
+    logShopStdout: () => {}
+  });
+
+  assert.equal(
+    service.buildProductLookupUrl('A-100'),
+    'https://shop.test/api/v1/products/A-100/?city_id=7&shop_id=shop-22'
+  );
+  assert.equal(
+    service.buildShopBarcodeUrl('123'),
+    'https://shop.test/api/v1/products/barcode/123/?city_id=7&shop_id=shop-22'
+  );
 });
 
 test('shop API service triggers onTokenUpdate and updates tokenState when token changes', async () => {
