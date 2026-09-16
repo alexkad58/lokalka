@@ -37,6 +37,16 @@ async function readJsonOrThrow(response, fallbackError) {
   return data;
 }
 
+async function readJsonWithErrorDetails(response, fallbackError) {
+  const data = await response.json().catch(() => ({}));
+  if (response.ok && data?.ok !== false) return data;
+
+  const error = new Error(data.error || fallbackError);
+  error.status = response.status;
+  error.payload = data;
+  throw error;
+}
+
 export function setAuthToken(token) {
   authToken = String(token || '').trim();
 }
@@ -81,10 +91,12 @@ export async function getAdminUsers() {
   return readJsonOrThrow(response, 'Не удалось загрузить пользователей');
 }
 
-export async function getAdminLogs(level = 'all', limit = 200) {
+export async function getAdminLogs(level = 'all', limit = 200, options = {}) {
   const params = new URLSearchParams();
   params.set('level', String(level || 'all'));
   params.set('limit', String(limit));
+  if (options.group && options.group !== 'all') params.set('group', String(options.group));
+  if (Array.isArray(options.users) && options.users.length > 0) params.set('users', options.users.join(','));
 
   const response = await fetch(`/api/admin/logs?${params.toString()}`, {
     headers: authHeaders()
@@ -164,6 +176,76 @@ export async function updateAdminShopApiToken(token) {
   return readJsonOrThrow(response, 'Не удалось сохранить токен API магазина');
 }
 
+export async function getAdminProductByCode(code, storeNumber = '') {
+  const params = new URLSearchParams();
+  if (storeNumber) params.set('storeNumber', String(storeNumber));
+  const suffix = params.toString() ? `?${params.toString()}` : '';
+  const response = await fetch(`/api/admin/products/${encodeURIComponent(code)}${suffix}`, {
+    headers: authHeaders()
+  });
+  return readJsonOrThrow(response, 'Не удалось загрузить товар по артикулу');
+}
+
+export async function getSecurityProductByCode(code, storeNumber = '') {
+  const params = new URLSearchParams();
+  if (storeNumber) params.set('storeNumber', String(storeNumber));
+  const suffix = params.toString() ? `?${params.toString()}` : '';
+  const response = await fetch(`/api/referrals/products/${encodeURIComponent(code)}${suffix}`, {
+    headers: authHeaders()
+  });
+  return readJsonOrThrow(response, 'Не удалось загрузить товар по артикулу');
+}
+
+export async function getAdminCodebook(filter = 'all', page = 1, limit = 12) {
+  const params = new URLSearchParams({ filter: String(filter || 'all'), page: String(page), limit: String(limit) });
+  const response = await fetch(`/api/admin/barcode-cache?${params.toString()}`, {
+    headers: authHeaders()
+  });
+  return readJsonOrThrow(response, 'Не удалось загрузить справочник кодов');
+}
+
+export async function getSecurityCodebook(filter = 'all', page = 1, limit = 12) {
+  const params = new URLSearchParams({ filter: String(filter || 'all'), page: String(page), limit: String(limit) });
+  const response = await fetch(`/api/referrals/barcode-cache?${params.toString()}`, {
+    headers: authHeaders()
+  });
+  return readJsonOrThrow(response, 'Не удалось загрузить справочник кодов');
+}
+
+export async function updateAdminCodebookEntry(code, barcodes) {
+  const response = await fetch(`/api/admin/barcode-cache/${encodeURIComponent(code)}`, {
+    method: 'PATCH',
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ barcodes })
+  });
+  return readJsonOrThrow(response, 'Не удалось сохранить связь кода товара');
+}
+
+export async function deleteAdminCodebookEntry(code) {
+  const response = await fetch(`/api/admin/barcode-cache/${encodeURIComponent(code)}`, {
+    method: 'DELETE',
+    headers: authHeaders()
+  });
+  return readJsonOrThrow(response, 'Не удалось удалить связь кода товара');
+}
+
+export async function updateSecurityCodebookEntry(code, barcodes) {
+  const response = await fetch(`/api/referrals/barcode-cache/${encodeURIComponent(code)}`, {
+    method: 'PATCH',
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ barcodes })
+  });
+  return readJsonOrThrow(response, 'Не удалось сохранить связь кода товара');
+}
+
+export async function deleteSecurityCodebookEntry(code) {
+  const response = await fetch(`/api/referrals/barcode-cache/${encodeURIComponent(code)}`, {
+    method: 'DELETE',
+    headers: authHeaders()
+  });
+  return readJsonOrThrow(response, 'Не удалось удалить связь кода товара');
+}
+
 export async function activateUserSubscription(userId, payload = {}) {
   const response = await fetch(`/api/admin/users/${encodeURIComponent(userId)}/subscription`, {
     method: 'POST',
@@ -188,6 +270,40 @@ export async function setUserDeviceBindingDisabled(userId, disabled) {
     body: JSON.stringify({ disabled })
   });
   return readJsonOrThrow(response, 'Не удалось изменить ограничение привязки');
+}
+
+export async function setUserSecurityRole(userId, enabled) {
+  const response = await fetch(`/api/admin/users/${encodeURIComponent(userId)}/security-role`, {
+    method: 'POST',
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ enabled })
+  });
+  return readJsonOrThrow(response, 'Не удалось изменить роль СБ');
+}
+
+export async function issueUserReferralCode(userId, payload = {}) {
+  const response = await fetch(`/api/admin/users/${encodeURIComponent(userId)}/referral-code`, {
+    method: 'POST',
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify(payload || {})
+  });
+  return readJsonOrThrow(response, 'Не удалось выдать код приглашения');
+}
+
+export async function getMyReferralStats() {
+  const response = await fetch('/api/referrals/me', {
+    headers: authHeaders()
+  });
+  return readJsonOrThrow(response, 'Не удалось загрузить данные по коду СБ');
+}
+
+export async function activateReferralCode(payload = {}) {
+  const response = await fetch('/api/referrals/activate', {
+    method: 'POST',
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify(payload || {})
+  });
+  return readJsonWithErrorDetails(response, 'Не удалось активировать код приглашения');
 }
 
 export async function deleteRecount(id) {

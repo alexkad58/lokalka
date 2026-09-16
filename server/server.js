@@ -13,6 +13,7 @@ import { createAuditLogService } from './services/audit-log-service.js';
 import { createPatchNotesService } from './services/patchnotes-service.js';
 import { createUsersService } from './services/users-service.js';
 import { createRecountService } from './services/recount-service.js';
+import { createReferralService } from './services/referral-service.js';
 import { createShopApiService } from './services/shop-api-service.js';
 import { createTsdBotService } from './services/tsd-bot-service.js';
 import { configurePdfFont } from './pdf/fonts.js';
@@ -25,6 +26,7 @@ import { createAdminRoutes } from './routes/admin.js';
 import { createBarcodeRoutes } from './routes/barcode.js';
 import { createPatchNotesRoutes } from './routes/patchnotes.js';
 import { createRecountRoutes } from './routes/recounts.js';
+import { createReferralRoutes } from './routes/referrals.js';
 import { hashPassword, verifyPassword } from './auth/password.js';
 import { createSessionManager } from './auth/sessions.js';
 import { createAuthMiddleware } from './auth/middleware.js';
@@ -80,7 +82,11 @@ const db = {
   users: [],
   recounts: [],
   sessions: [],
-  settings: {}
+  settings: {},
+  referrals: {
+    codes: [],
+    activations: []
+  }
 };
 
 const sessions = new Map();
@@ -133,11 +139,20 @@ const databaseStore = createJsonStore({
     ...user,
     login: normalizeLogin(user.login),
     isAdmin: Boolean(user.isAdmin || normalizeLogin(user.login) === ADMIN_LOGIN),
+    securityRole: Boolean(user.securityRole),
     subscriptionUntil: user.subscriptionUntil ? String(user.subscriptionUntil) : null,
-    deviceId: user?.deviceId ? normalizeDeviceId(user.deviceId) : null
+    deviceId: user?.deviceId ? normalizeDeviceId(user.deviceId) : null,
+    referralUsedAt: user?.referralUsedAt ? String(user.referralUsedAt) : null,
+    referralActivationId: user?.referralActivationId ? String(user.referralActivationId) : null
   }),
   normalizeSession,
   onLoad: state => {
+    if (!state.referrals || typeof state.referrals !== 'object') {
+      state.referrals = { codes: [], activations: [] };
+    }
+    if (!Array.isArray(state.referrals.codes)) state.referrals.codes = [];
+    if (!Array.isArray(state.referrals.activations)) state.referrals.activations = [];
+
     if (state.settings.shopApiAccessToken) {
       tokenState.accessToken = String(state.settings.shopApiAccessToken).trim();
     }
@@ -147,6 +162,7 @@ const databaseStore = createJsonStore({
     return ensureAdminUser() || hydrateSessionsFromDb();
   },
   onReset: state => {
+    state.referrals = { codes: [], activations: [] };
     ensureAdminUser();
     hydrateSessionsFromDb();
   }
@@ -275,6 +291,17 @@ usersService = createUsersService({
   toIsoNow,
   formatRuDate
 });
+
+const referralService = createReferralService({
+  db,
+  saveDb,
+  usersService,
+  createId,
+  toIsoNow,
+  randomBytes,
+  logEvent
+});
+referralService.ensureReferralState();
 
 const authMiddleware = createAuthMiddleware({
   db,
@@ -437,7 +464,8 @@ app.register(createAuthRoutes({
   tokenStorageKey: TOKEN_STORAGE_KEY,
   publicUser,
   authenticate,
-  buildRequestLogMeta
+  buildRequestLogMeta,
+  referralService
 }));
 app.register(createAccountRoutes({
   authenticate,
@@ -460,7 +488,16 @@ app.register(createAdminRoutes({
   tokenState,
   shopApiService,
   sessions,
-  getSupportLinks
+  getSupportLinks,
+  referralService
+}));
+app.register(createReferralRoutes({
+  authenticate,
+  referralService,
+  getRequestIp,
+  buildRequestLogMeta,
+  logEvent,
+  shopApiService
 }));
 app.register(createBarcodeRoutes({
   authenticate,

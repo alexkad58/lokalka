@@ -8,13 +8,31 @@ export default function AuthPage({
   authLoading,
   authError,
   setAuthError,
-  handleAuthSubmit
+  handleAuthSubmit,
+  inviteBanner,
+  clearPendingInvite
 }) {
   return (
     <div className="auth-page">
       <form className="auth-card" onSubmit={handleAuthSubmit}>
         <h1>Локалка</h1>
         <p>{authMode === 'login' ? 'Вход в систему' : 'Регистрация пользователя'}</p>
+
+        {inviteBanner ? (
+          <div className={`status ${inviteBanner.tone === 'error' ? 'error' : inviteBanner.tone === 'success' ? 'success' : ''}`}>
+            <div>{inviteBanner.message}</div>
+            {inviteBanner.code ? <div className="line mini">Код: {inviteBanner.code}</div> : null}
+            {clearPendingInvite ? (
+              <button
+                type="button"
+                className="ghost"
+                onClick={clearPendingInvite}
+              >
+                Очистить приглашение
+              </button>
+            ) : null}
+          </div>
+        ) : null}
 
         <input
           value={authLogin}

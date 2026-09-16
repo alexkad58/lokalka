@@ -1,4 +1,5 @@
 import { formatSubscriptionStatusLabel } from '../../utils/formatting.js';
+import SecurityReferralTab from './SecurityReferralTab.jsx';
 
 export default function SettingsModal({
   settingsOpen,
@@ -9,7 +10,14 @@ export default function SettingsModal({
   feedbackSoundEnabled,
   setFeedbackSoundEnabled,
   saveAccountSettings,
-  settingsSaving
+  settingsSaving,
+  isSecurityUser,
+  securityReferralData,
+  securityReferralLoading,
+  securityReferralError,
+  securityReferralStatus,
+  refreshSecurityReferralData,
+  copySecurityInviteLink
 }) {
   if (!settingsOpen) return null;
 
@@ -37,6 +45,21 @@ export default function SettingsModal({
         <button type="button" onClick={saveAccountSettings} disabled={settingsSaving}>
           {settingsSaving ? 'Сохранение...' : 'Сохранить'}
         </button>
+
+        {isSecurityUser ? (
+          <div className="settings-security-panel">
+            <h4>Реферальная система СБ</h4>
+            <SecurityReferralTab
+              referralData={securityReferralData}
+              loading={securityReferralLoading}
+              error={securityReferralError}
+              status={securityReferralStatus}
+              onRefresh={refreshSecurityReferralData}
+              onCopyInviteLink={copySecurityInviteLink}
+            />
+          </div>
+        ) : null}
+
         <button type="button" className="ghost" onClick={closeSettings}>Закрыть</button>
       </div>
     </div>

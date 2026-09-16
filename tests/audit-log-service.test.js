@@ -42,6 +42,39 @@ test('audit service keeps normalized entries and admin log query contract', () =
   assert.equal(logger.infoCalls.length, 1);
 });
 
+test('audit service groups noisy scanner logs and filters by actor', () => {
+  let id = 0;
+  const service = createAuditLogService({
+    logger: {},
+    maxAuditLogs: 200,
+    knownLogLevels: ['all', 'error', 'warn', 'info'],
+    createId: prefix => `${prefix}_${++id}`,
+    toIsoNow,
+    sanitizeLogLevel,
+    sanitizeLogMeta,
+    getRequestIp,
+    shopApiStdoutLogs: false
+  });
+
+  service.logEvent('info', 'resolve-barcode-request', { actorId: 'u1', actorLogin: 'anna', barcode: '111' });
+  service.logEvent('info', 'shop-api-response', { actorId: 'u1', actorLogin: 'anna', status: 200 });
+  service.logEvent('info', 'recount-create-success', { actorId: 'u2', actorLogin: 'boris', recountId: 'r1' });
+  service.logEvent('warn', 'login-failed', { login: 'boris' });
+
+  const scannerLogs = service.getLogs('all', 20, 'scanner');
+  assert.equal(scannerLogs.selectedGroup, 'scanner');
+  assert.equal(scannerLogs.total, 2);
+  assert.equal(scannerLogs.groupCounts.scanner, 2);
+  assert.equal(scannerLogs.groupCounts.recount, 1);
+  assert.equal(scannerLogs.entries.every(entry => entry.group === 'scanner'), true);
+
+  const userLogs = service.getLogs('all', 20, 'all', 'u2');
+  assert.equal(userLogs.selectedActorKeys[0], 'u2');
+  assert.equal(userLogs.total, 1);
+  assert.equal(userLogs.entries[0].event, 'recount-create-success');
+  assert.deepEqual(userLogs.users.map(item => item.login), ['anna', 'boris', 'система']);
+});
+
 test('audit service builds request metadata without exposing unrelated fields', () => {
   const service = createAuditLogService({
     logger: {},

@@ -5,7 +5,11 @@ function createEmptyState() {
     users: [],
     recounts: [],
     sessions: [],
-    settings: {}
+    settings: {},
+    referrals: {
+      codes: [],
+      activations: []
+    }
   };
 }
 
@@ -27,6 +31,9 @@ export function createJsonStore({ fileUrl, normalizeUser, normalizeSession, onLo
       state.sessions = Array.isArray(parsed?.sessions)
         ? parsed.sessions.map(normalizeSession)
         : [];
+      state.referrals = parsed?.referrals && typeof parsed.referrals === 'object'
+        ? parsed.referrals
+        : { codes: [], activations: [] };
 
       const changed = await onLoad?.(state);
       if (changed) await save(state);

@@ -4,7 +4,7 @@ import { createCanvas, loadImage } from "canvas";
 
 const CANVAS_WIDTH = 700;
 const CANVAS_HEIGHT = 500;
-const QR_SIZE = 250;
+const QR_SIZE = 220;
 const BARCODE_WIDTH = 350;
 const BARCODE_HEIGHT = 160;
 const PADDING = 30;

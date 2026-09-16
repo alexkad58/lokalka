@@ -12,7 +12,8 @@ export function createAdminRoutes({
   tokenState,
   shopApiService,
   sessions,
-  getSupportLinks
+  getSupportLinks,
+  referralService
 }) {
   function normalizeSupportUrl(value, fallback) {
     const raw = String(value || '').trim();
@@ -31,20 +32,77 @@ export function createAdminRoutes({
         .sort((a, b) => a.login.localeCompare(b.login))
         .map(user => {
           const status = buildSubscriptionStatus(user);
+          const referral = referralService.enrichPublicUser(user);
           return {
             id: user.id,
             login: user.login,
             createdAt: user.createdAt,
             isAdmin: Boolean(user.isAdmin),
+            securityRole: referral.securityRole,
+            role: referral.role,
             subscriptionUntil: user.subscriptionUntil || null,
             subscriptionActive: hasActiveSubscription(user),
             deviceBound: Boolean(user.deviceId),
             deviceBindingDisabled: Boolean(user.deviceBindingDisabled),
+            referralUsedAt: referral.referralUsedAt,
+            referralActivationId: referral.referralActivationId,
+            referralCode: referral.referralCode,
+            referralTrialDays: referral.referralTrialDays,
             subscriptionStatusKey: status.key,
             subscriptionStatusLabel: status.label
           };
         })
     }));
+
+    app.post('/api/admin/users/:id/security-role', { preHandler: [authenticate, requireAdmin] }, async (request, reply) => {
+      const { id } = request.params;
+      const body = request.body && typeof request.body === 'object' ? request.body : {};
+      const target = db.users.find(user => user.id === id);
+      if (!target) return reply.code(404).send({ ok: false, error: 'Пользователь не найден' });
+      if (target.isAdmin) return reply.code(400).send({ ok: false, error: 'Нельзя назначить роль СБ администратору' });
+
+      const enabled = Boolean(body.enabled);
+      await referralService.setSecurityRole({
+        actor: request.user,
+        targetUser: target,
+        enabled,
+        requestMeta: buildRequestLogMeta(request)
+      });
+      return { ok: true, user: publicUser(target) };
+    });
+
+    app.post('/api/admin/users/:id/referral-code', { preHandler: [authenticate, requireAdmin] }, async (request, reply) => {
+      const { id } = request.params;
+      const body = request.body && typeof request.body === 'object' ? request.body : {};
+      const target = db.users.find(user => user.id === id);
+      if (!target) return reply.code(404).send({ ok: false, error: 'Пользователь не найден' });
+      if (target.isAdmin) return reply.code(400).send({ ok: false, error: 'Для администратора код не требуется' });
+
+      try {
+        const codeRecord = await referralService.issueCode({
+          actor: request.user,
+          targetUser: target,
+          trialDays: body.trialDays,
+          regenerate: Boolean(body.regenerate),
+          requestMeta: buildRequestLogMeta(request)
+        });
+        return {
+          ok: true,
+          referral: {
+            code: codeRecord.code,
+            trialDays: codeRecord.trialDays,
+            revokedAt: codeRecord.revokedAt || null
+          },
+          user: publicUser(target)
+        };
+      } catch (error) {
+        return reply.code(Number(error?.statusCode) || 400).send({
+          ok: false,
+          code: error?.code || undefined,
+          error: error?.message || 'Не удалось выдать код приглашения'
+        });
+      }
+    });
 
     app.get('/api/admin/shop-api', { preHandler: [authenticate, requireAdmin] }, async () => ({
       ok: true,
@@ -52,6 +110,54 @@ export function createAdminRoutes({
       tokenLast5: shopApiService.lastTokenChars(tokenState.accessToken),
       tokenUpdatedAt: tokenState.updatedAt
     }));
+
+    app.get('/api/admin/barcode-cache', { preHandler: [authenticate, requireAdmin] }, async request => {
+      const query = request.query && typeof request.query === 'object' ? request.query : {};
+      const filter = String(query.filter || 'all').trim();
+      const page = Number.parseInt(String(query.page || '1'), 10);
+      const limit = Number.parseInt(String(query.limit || '12'), 10);
+      return { ok: true, ...(shopApiService.buildCodebookEntries({ filter, page, limit })) };
+    });
+
+    app.patch('/api/admin/barcode-cache/:code', { preHandler: [authenticate, requireAdmin] }, async (request, reply) => {
+      const code = String(request.params?.code || '').trim();
+      const body = request.body && typeof request.body === 'object' ? request.body : {};
+      if (!code || !Array.isArray(body.barcodes)) {
+        return reply.code(400).send({ ok: false, error: 'Код и массив штрихкодов обязательны' });
+      }
+      return { ok: true, ...shopApiService.updateCodebookEntry(code, body.barcodes) };
+    });
+
+    app.delete('/api/admin/barcode-cache/:code', { preHandler: [authenticate, requireAdmin] }, async (request, reply) => {
+      const code = String(request.params?.code || '').trim();
+      if (!code) return reply.code(400).send({ ok: false, error: 'Не указан код товара' });
+      return { ok: true, ...shopApiService.deleteCodebookEntry(code) };
+    });
+
+    app.get('/api/admin/products/:code', { preHandler: [authenticate, requireAdmin] }, async (request, reply) => {
+      const code = String(request.params?.code || '').trim();
+      const storeNumber = String(request.query?.storeNumber || request.query?.shop_id || '').trim();
+      if (!code) {
+        return reply.code(400).send({ ok: false, error: 'Не указан код товара' });
+      }
+
+      const result = await shopApiService.fetchProductByArticle(code, storeNumber);
+      if (!result.ok) {
+        return reply.code(Number(result.status) || 502).send({
+          ok: false,
+          error: result.error?.message || 'Не удалось получить товар по артикулу',
+          details: result.error || null
+        });
+      }
+
+      return {
+        ok: true,
+        product: result.product,
+        payload: result.payload,
+        articleCode: result.articleCode,
+        source: result.source
+      };
+    });
 
     app.get('/api/admin/contact-links', { preHandler: [authenticate, requireAdmin] }, async () => ({
       ok: true,
@@ -102,7 +208,7 @@ export function createAdminRoutes({
 
     app.get('/api/admin/logs', { preHandler: [authenticate, requireAdmin] }, async request => {
       const query = request.query && typeof request.query === 'object' ? request.query : {};
-      return { ok: true, ...getLogs(query.level, query.limit) };
+      return { ok: true, ...getLogs(query.level, query.limit, query.group, query.users) };
     });
 
     app.post('/api/admin/users/:id/subscription', { preHandler: [authenticate, requireAdmin] }, async (request, reply) => {
@@ -193,6 +299,15 @@ export function createAdminRoutes({
 
       db.users = db.users.filter(user => user.id !== target.id);
       db.recounts = db.recounts.filter(item => item.userId !== target.id);
+      if (db.referrals?.codes) {
+        const now = new Date().toISOString();
+        for (const code of db.referrals.codes) {
+          if (code.ownerUserId === target.id && !code.revokedAt) {
+            code.revokedAt = now;
+            code.revokeReason = 'owner-deleted';
+          }
+        }
+      }
       for (const [token, session] of sessions.entries()) {
         if (session?.userId === target.id) sessions.delete(token);
       }

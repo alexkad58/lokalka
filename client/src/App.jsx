@@ -8,6 +8,7 @@ import {
 } from '../../shared/recount-utils.js';
 import { markCompletionSurveyPending, track } from './analytics';
 import {
+  activateReferralCode,
   activateUserSubscription,
   bindBarcodeToItem,
   completeRecount,
@@ -17,11 +18,20 @@ import {
   deleteAdminUser,
   deleteRecount,
   finishRecountWithoutPdf,
+  getAdminCodebook,
   getAdminContactLinks,
   getAdminLogs,
   getAdminPatchNotes,
+  getAdminProductByCode,
   getAdminShopApiSettings,
   getAdminUsers,
+  getMyReferralStats,
+  getSecurityCodebook,
+  getSecurityProductByCode,
+  updateAdminCodebookEntry,
+  deleteAdminCodebookEntry,
+  updateSecurityCodebookEntry,
+  deleteSecurityCodebookEntry,
   getPatchNotes,
   getRecount,
   getRecounts,
@@ -34,7 +44,9 @@ import {
   resolveBarcode,
   saveRecountProgress,
   setAuthToken,
+  setUserSecurityRole,
   setUserDeviceBindingDisabled,
+  issueUserReferralCode as issueUserReferralCodeApi,
   updateAccountSettings,
   updateAdminContactLinks,
   updateAdminPatchNote,
@@ -76,9 +88,85 @@ import TsdPage from './components/tsd/TsdPage.jsx';
 import HomePage from './components/home/HomePage.jsx';
 import RecountPage from './components/recount/RecountPage.jsx';
 import KeypadSandboxPage from './KeypadSandboxPage.jsx';
+import CodebookPage from './components/codebook/CodebookPage.jsx';
 
 const TOKEN_KEY = 'lokalka_auth_token';
+const PENDING_INVITE_KEY = 'lokalka_pending_invite';
 const AUTOSAVE_INTERVAL_MS = 8000;
+
+function normalizeInviteCode(rawValue) {
+  return String(rawValue || '')
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, '')
+    .slice(0, 20);
+}
+
+function getInviteFromUrl() {
+  if (typeof window === 'undefined') return '';
+  const params = new URLSearchParams(window.location.search);
+  return normalizeInviteCode(params.get('invite'));
+}
+
+function buildInviteLink(inviteCode) {
+  if (typeof window === 'undefined') return '';
+  const code = normalizeInviteCode(inviteCode);
+  if (!code) return '';
+  const url = new URL(window.location.origin);
+  url.pathname = '/';
+  url.searchParams.set('invite', code);
+  return url.toString();
+}
+
+async function copyTextWithFallback(rawText) {
+  const text = String(rawText || '');
+  if (!text) {
+    return { ok: false, error: 'Пустую ссылку скопировать нельзя.' };
+  }
+
+  if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return { ok: true };
+    } catch {
+      // Fallback below for denied permissions or insecure context.
+    }
+  }
+
+  if (typeof document === 'undefined') {
+    return { ok: false, error: 'Буфер обмена недоступен в этом окружении.' };
+  }
+
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.setAttribute('readonly', 'true');
+  textarea.style.position = 'fixed';
+  textarea.style.opacity = '0';
+  textarea.style.pointerEvents = 'none';
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+
+  try {
+    const copied = document.execCommand('copy');
+    if (!copied) {
+      return { ok: false, error: 'Не удалось скопировать ссылку. Скопируйте ее вручную.' };
+    }
+    return { ok: true };
+  } catch {
+    return { ok: false, error: 'Не удалось скопировать ссылку. Скопируйте ее вручную.' };
+  } finally {
+    textarea.remove();
+  }
+}
+
+function isSecurityUserRole(account) {
+  return Boolean(account?.securityRole || account?.role === 'security' || account?.role === 'sb' || account?.isSecurity || account?.isSb);
+}
+
+function hasUsedReferralCode(account) {
+  return Boolean(account?.referralUsedAt || account?.usedReferralCode || account?.hasUsedReferral || account?.referralActivationId);
+}
 
 function buildProgressPayload(values, search, barcodeCache) {
   return {
@@ -125,9 +213,11 @@ export default function App() {
   const [authPassword, setAuthPassword] = useState('');
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState('');
+  const [authInviteBanner, setAuthInviteBanner] = useState(null);
 
   const [homeLoading, setHomeLoading] = useState(false);
   const [homeTab, setHomeTab] = useState('recounts');
+  const [homeInviteNotice, setHomeInviteNotice] = useState('');
   const [activeSummary, setActiveSummary] = useState(null);
   const [previousRecounts, setPreviousRecounts] = useState([]);
   const [patchNotes, setPatchNotes] = useState([]);
@@ -140,10 +230,14 @@ export default function App() {
   const [adminUserSearch, setAdminUserSearch] = useState('');
   const [adminUserFilter, setAdminUserFilter] = useState('all');
   const [adminLogLevel, setAdminLogLevel] = useState('all');
+  const [adminLogGroup, setAdminLogGroup] = useState('all');
+  const [adminLogSelectedUsers, setAdminLogSelectedUsers] = useState([]);
+  const [adminLogUsers, setAdminLogUsers] = useState([]);
   const [adminLogSearch, setAdminLogSearch] = useState('');
   const [adminLogVisibleLimit, setAdminLogVisibleLimit] = useState(50);
   const [adminLogEntries, setAdminLogEntries] = useState([]);
   const [adminLogCounts, setAdminLogCounts] = useState({});
+  const [adminLogGroupCounts, setAdminLogGroupCounts] = useState({});
   const [adminLogLoading, setAdminLogLoading] = useState(false);
   const [adminContactLinks, setAdminContactLinks] = useState({ telegramUrl: '', maxUrl: '' });
   const [adminContactLinksSaving, setAdminContactLinksSaving] = useState(false);
@@ -165,6 +259,22 @@ export default function App() {
   const [adminNewPatchNoteOpen, setAdminNewPatchNoteOpen] = useState(false);
   const [adminSuccess, setAdminSuccess] = useState('');
   const [copiedLogId, setCopiedLogId] = useState('');
+  const [referralTrialDays, setReferralTrialDays] = useState(1);
+  const [codebookData, setCodebookData] = useState({ entries: [], total: 0, page: 1, limit: 12, totalPages: 1, stats: {} });
+  const [codebookFilter, setCodebookFilter] = useState('all');
+  const [codebookPage, setCodebookPage] = useState(1);
+  const [codebookLoading, setCodebookLoading] = useState(false);
+  const [codebookLoadingMore, setCodebookLoadingMore] = useState(false);
+  const [codebookSearch, setCodebookSearch] = useState('');
+  const [codebookProducts, setCodebookProducts] = useState({});
+  const [productCard, setProductCard] = useState(null);
+  const [productCardLoading, setProductCardLoading] = useState(false);
+  const [productCardError, setProductCardError] = useState('');
+  const [productCardSaving, setProductCardSaving] = useState(false);
+  const [productCardDeleting, setProductCardDeleting] = useState(false);
+  const codebookProductsRef = useRef(new Set());
+  const codebookFeedRef = useRef(null);
+  const codebookLoadMoreRef = useRef(null);
 
   const [activeRecount, setActiveRecount] = useState(null);
   const [values, setValues] = useState({});
@@ -194,6 +304,17 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [defaultCounterNameInput, setDefaultCounterNameInput] = useState('');
   const [settingsSaving, setSettingsSaving] = useState(false);
+  const [pendingInviteCode, setPendingInviteCode] = useState(() => {
+    if (typeof localStorage === 'undefined') return '';
+    return normalizeInviteCode(localStorage.getItem(PENDING_INVITE_KEY));
+  });
+  const [referralCodeInput, setReferralCodeInput] = useState('');
+  const [referralActivating, setReferralActivating] = useState(false);
+  const [referralStatus, setReferralStatus] = useState({ tone: '', message: '' });
+  const [securityReferralData, setSecurityReferralData] = useState(null);
+  const [securityReferralLoading, setSecurityReferralLoading] = useState(false);
+  const [securityReferralError, setSecurityReferralError] = useState('');
+  const [securityReferralStatus, setSecurityReferralStatus] = useState({ tone: '', message: '' });
   const [feedbackSoundEnabled, setFeedbackSoundEnabled] = useState(() => (
     localStorage.getItem(FEEDBACK_SOUND_STORAGE_KEY) !== '0'
   ));
@@ -202,6 +323,9 @@ export default function App() {
   ));
   const [keypadLabOpen, setKeypadLabOpen] = useState(() => (
     import.meta.env.DEV && typeof window !== 'undefined' && window.location.pathname === '/keypad-lab'
+  ));
+  const [codebookOpen, setCodebookOpen] = useState(() => (
+    typeof window !== 'undefined' && window.location.pathname === '/codebook'
   ));
   const [tsdPriceModalOpen, setTsdPriceModalOpen] = useState(false);
   const [tsdPriceInput, setTsdPriceInput] = useState('');
@@ -219,6 +343,7 @@ export default function App() {
   const itemCardRefs = useRef(new Map());
   const keypadRef = useRef(null);
   const blurGuardUntilRef = useRef(0);
+  const autoInviteAttemptRef = useRef('');
 
   const handleScannedCode = useCallback(async (code) => {
     const rawCode = String(code || '').trim();
@@ -349,15 +474,58 @@ export default function App() {
   }, [activeFactCode]);
 
   useEffect(() => {
+    captureInviteFromUrl();
+  }, []);
+
+  useEffect(() => {
     const handlePopState = () => {
       const path = window.location.pathname;
       setTsdOpen(path === '/tsd');
       setKeypadLabOpen(path === '/keypad-lab');
+      captureInviteFromUrl();
     };
 
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
-  }, []);
+  }, [pendingInviteCode]);
+
+  useEffect(() => {
+    if (token || !pendingInviteCode) return;
+    setAuthInviteBanner({
+      tone: '',
+      code: pendingInviteCode,
+      message: 'Приглашение сохранено. Войдите или зарегистрируйтесь, чтобы применить код.'
+    });
+  }, [token, pendingInviteCode]);
+
+  useEffect(() => {
+    if (!user || !pendingInviteCode || user.isAdmin) {
+      setHomeInviteNotice('');
+      return;
+    }
+
+    if (user.subscriptionActive) {
+      setHomeInviteNotice('Приглашение не применено: подписка уже активна.');
+      return;
+    }
+
+    if (hasUsedReferralCode(user)) {
+      setHomeInviteNotice('Приглашение не применено: для этого аккаунта код уже использован ранее.');
+      if (!user.subscriptionActive) {
+        setReferralStatus({
+          tone: '',
+          message: 'Приглашение не применено: для этого аккаунта реферальный код уже использован ранее.'
+        });
+      }
+      return;
+    }
+
+    const attemptKey = `${user.id}:${pendingInviteCode}`;
+    if (autoInviteAttemptRef.current === attemptKey) return;
+    autoInviteAttemptRef.current = attemptKey;
+
+    void applyReferralCode(pendingInviteCode, true);
+  }, [user, pendingInviteCode]);
 
   useEffect(() => {
     if (!tsdResult?.raw) {
@@ -366,7 +534,7 @@ export default function App() {
     }
 
     let cancelled = false;
-    QRCode.toDataURL(tsdResult.raw, { margin: 1, width: 320 })
+    QRCode.toDataURL(tsdResult.raw, { margin: 1, width: 280 })
       .then(dataUrl => {
         if (!cancelled) setTsdQrDataUrl(dataUrl);
       })
@@ -386,8 +554,8 @@ export default function App() {
     }
 
     try {
-      const canvas = document.createElement('canvas');
-      bwipjs.toCanvas(canvas, {
+      const barcodeCanvas = document.createElement('canvas');
+      bwipjs.toCanvas(barcodeCanvas, {
         bcid: 'code128',
         text: tsdResult.barcode,
         scale: 3,
@@ -395,6 +563,15 @@ export default function App() {
         includetext: true,
         textxalign: 'center'
       });
+
+      const frame = 16;
+      const canvas = document.createElement('canvas');
+      canvas.width = barcodeCanvas.width + frame * 2;
+      canvas.height = barcodeCanvas.height + frame * 2;
+      const context = canvas.getContext('2d');
+      context.fillStyle = '#ffffff';
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      context.drawImage(barcodeCanvas, frame, frame);
       setTsdBarcodeDataUrl(canvas.toDataURL('image/png'));
     } catch {
       setTsdBarcodeDataUrl('');
@@ -601,6 +778,186 @@ export default function App() {
     }
   }
 
+  function setStoredPendingInvite(code) {
+    const normalized = normalizeInviteCode(code);
+    if (typeof localStorage !== 'undefined') {
+      if (normalized) {
+        localStorage.setItem(PENDING_INVITE_KEY, normalized);
+      } else {
+        localStorage.removeItem(PENDING_INVITE_KEY);
+      }
+    }
+    setPendingInviteCode(normalized);
+    return normalized;
+  }
+
+  function clearPendingInvite() {
+    setStoredPendingInvite('');
+    setAuthInviteBanner(null);
+    autoInviteAttemptRef.current = '';
+  }
+
+  function getReferralErrorMessage(err) {
+    const code = String(err?.payload?.code || '').toUpperCase();
+    if (code === 'REFERRAL_EXPIRED') return 'Срок действия кода истек.';
+    if (code === 'REFERRAL_REVOKED') return 'Код был отозван и больше не действует.';
+    if (code === 'REFERRAL_ALREADY_USED') return 'Код уже использован этим пользователем.';
+    if (code === 'REFERRAL_BLOCKED' || code === 'REFERRAL_RATE_LIMIT') return 'Слишком много попыток. Попробуйте позже.';
+    if (code === 'REFERRAL_INVALID') return 'Код недействителен или недоступен.';
+
+    const text = String(err?.message || '').toLowerCase();
+    if (text.includes('просроч') || text.includes('истек')) return 'Срок действия кода истек.';
+    if (text.includes('отозван')) return 'Код был отозван и больше не действует.';
+    if (text.includes('использ')) return 'Код уже использован этим пользователем.';
+    if (text.includes('блок') || text.includes('лимит')) return 'Слишком много попыток. Попробуйте позже.';
+    if (text.includes('невалид') || text.includes('недейств')) return 'Код недействителен или недоступен.';
+    return 'Не удалось активировать код. Проверьте его и попробуйте еще раз.';
+  }
+
+  function captureInviteFromUrl() {
+    const inviteFromUrl = getInviteFromUrl();
+    if (!inviteFromUrl) return;
+
+    if (pendingInviteCode && pendingInviteCode !== inviteFromUrl) {
+      setAuthInviteBanner({
+        tone: '',
+        code: pendingInviteCode,
+        message: 'Уже сохранено приглашение. Очистите текущее, если нужно применить другой код.'
+      });
+      return;
+    }
+
+    const stored = setStoredPendingInvite(inviteFromUrl);
+    if (!stored) return;
+
+    setAuthInviteBanner({
+      tone: '',
+      code: stored,
+      message: 'Найдено приглашение по ссылке. Код будет применен после входа или регистрации.'
+    });
+    setReferralStatus({ tone: '', message: '' });
+  }
+
+  async function refreshSecurityReferralData(account = user) {
+    if (!isSecurityUserRole(account)) return;
+    setSecurityReferralLoading(true);
+    setSecurityReferralError('');
+    setSecurityReferralStatus({ tone: '', message: '' });
+    try {
+      const data = await getMyReferralStats();
+      const nextData = data?.referral || data || null;
+      setSecurityReferralData(nextData);
+    } catch (err) {
+      setSecurityReferralError(err instanceof Error ? err.message : 'Не удалось загрузить статистику СБ');
+    } finally {
+      setSecurityReferralLoading(false);
+    }
+  }
+
+  async function applyReferralCode(rawCode, automatic = false) {
+    const code = normalizeInviteCode(rawCode);
+    if (!code) {
+      setReferralStatus({ tone: 'error', message: 'Введите корректный код из букв и цифр.' });
+      return false;
+    }
+
+    setReferralActivating(true);
+    setReferralStatus({ tone: '', message: automatic ? 'Пробуем активировать приглашение...' : '' });
+
+    try {
+      const result = await activateReferralCode({ code });
+      const nextUser = result?.user || null;
+      if (nextUser) {
+        setUser(nextUser);
+      }
+
+      setStoredPendingInvite('');
+      setReferralCodeInput('');
+      setAuthInviteBanner({ tone: 'success', code: '', message: 'Код приглашения успешно применен.' });
+      setReferralStatus({ tone: 'success', message: 'Пробный доступ активирован.' });
+
+      if (nextUser?.subscriptionActive) {
+        await Promise.all([refreshDashboard(), refreshPatchNotes()]);
+      }
+      return true;
+    } catch (err) {
+      setReferralStatus({ tone: 'error', message: getReferralErrorMessage(err) });
+      return false;
+    } finally {
+      setReferralActivating(false);
+    }
+  }
+
+  async function activateReferralManually() {
+    const success = await applyReferralCode(referralCodeInput, false);
+    if (success) {
+      setHomeInviteNotice('');
+    }
+  }
+
+  async function updateUserSecurityRole(targetUserId, enabled) {
+    setActivatingUserId(targetUserId);
+    setError('');
+    try {
+      await setUserSecurityRole(targetUserId, enabled);
+      showAdminSuccess(enabled ? 'Роль СБ назначена' : 'Роль СБ снята');
+      await refreshAdminUsers();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось изменить роль СБ');
+    } finally {
+      setActivatingUserId('');
+    }
+  }
+
+  async function issueUserReferralCode(targetUserId, regenerate) {
+    setActivatingUserId(targetUserId);
+    setError('');
+    try {
+      await issueUserReferralCodeApi(targetUserId, {
+        regenerate: Boolean(regenerate),
+        trialDays: Number(referralTrialDays) === 3 ? 3 : 1
+      });
+      showAdminSuccess(regenerate ? 'Код успешно перегенерирован' : 'Код успешно создан');
+      await refreshAdminUsers();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось выдать код приглашения');
+    } finally {
+      setActivatingUserId('');
+    }
+  }
+
+  async function copySecurityInviteLink() {
+    const code = normalizeInviteCode(securityReferralData?.code);
+    if (!code) {
+      setSecurityReferralError('Код не найден. Запросите выдачу у администратора.');
+      setSecurityReferralStatus({ tone: '', message: '' });
+      return;
+    }
+
+    const result = await copyTextWithFallback(buildInviteLink(code));
+    if (result.ok) {
+      setSecurityReferralError('');
+      setSecurityReferralStatus({ tone: 'success', message: 'Инвайт-ссылка скопирована.' });
+    } else {
+      setSecurityReferralStatus({ tone: 'error', message: result.error || 'Не удалось скопировать ссылку.' });
+    }
+  }
+
+  async function copyUserInviteLink(targetUser) {
+    const code = normalizeInviteCode(targetUser?.referralCode || targetUser?.securityReferralCode || targetUser?.referral?.code);
+    if (!code) {
+      setError('У пользователя пока нет кода приглашения.');
+      return;
+    }
+
+    const result = await copyTextWithFallback(buildInviteLink(code));
+    if (result.ok) {
+      showAdminSuccess('Инвайт-ссылка скопирована');
+    } else {
+      setError(result.error || 'Не удалось скопировать ссылку');
+    }
+  }
+
   async function refreshDashboard() {
     setHomeLoading(true);
     setError('');
@@ -642,14 +999,18 @@ export default function App() {
     }
   }
 
-  async function refreshAdminLogs(level = adminLogLevel) {
+  async function refreshAdminLogs(level = adminLogLevel, group = adminLogGroup, users = adminLogSelectedUsers) {
     setAdminLogLoading(true);
     setError('');
     try {
-      const data = await getAdminLogs(level, 250);
+      const data = await getAdminLogs(level, 250, { group, users });
       setAdminLogLevel(data?.selectedLevel || level);
+      setAdminLogGroup(data?.selectedGroup || group);
+      setAdminLogSelectedUsers(Array.isArray(data?.selectedActorKeys) ? data.selectedActorKeys : users);
+      setAdminLogUsers(Array.isArray(data?.users) ? data.users : []);
       setAdminLogEntries(Array.isArray(data?.entries) ? data.entries : []);
       setAdminLogCounts(data?.levelCounts && typeof data.levelCounts === 'object' ? data.levelCounts : {});
+      setAdminLogGroupCounts(data?.groupCounts && typeof data.groupCounts === 'object' ? data.groupCounts : {});
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось загрузить логи');
     } finally {
@@ -685,6 +1046,149 @@ export default function App() {
       setError(err instanceof Error ? err.message : 'Не удалось загрузить патчноуты для админки');
     } finally {
       setAdminPatchNotesLoading(false);
+    }
+  }
+
+  async function refreshCodebook(nextFilter = codebookFilter, nextPage = 1, append = false) {
+    if (!user) return;
+    if (append) setCodebookLoadingMore(true);
+    else setCodebookLoading(true);
+    setError('');
+    try {
+      const service = user.isAdmin ? getAdminCodebook : getSecurityCodebook;
+      const data = await service(nextFilter, nextPage, 12);
+      setCodebookData({
+        entries: append
+          ? [...(codebookData.entries || []), ...(Array.isArray(data?.entries) ? data.entries : [])]
+          : (Array.isArray(data?.entries) ? data.entries : []),
+        total: Number(data?.total || 0),
+        page: Number(data?.page || nextPage || 1),
+        limit: Number(data?.limit || 12),
+        totalPages: Number(data?.totalPages || 1),
+        stats: data?.stats || {}
+      });
+      setCodebookPage(Number(data?.page || nextPage || 1));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось загрузить справочник кодов');
+    } finally {
+      if (append) setCodebookLoadingMore(false);
+      else setCodebookLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!user) return;
+    const canViewCodebook = user.isAdmin || isSecurityUserRole(user);
+    if (!canViewCodebook) return;
+    if (!codebookOpen) return;
+    setCodebookProducts({});
+    codebookProductsRef.current = new Set();
+    void refreshCodebook(codebookFilter, 1);
+  }, [user, codebookOpen, codebookFilter]);
+
+  useEffect(() => {
+    const entries = codebookData.entries || [];
+    const pendingEntries = entries.filter(entry => (
+      !codebookProductsRef.current.has(String(entry.code))
+    ));
+    if (!pendingEntries.length || !user) return;
+
+    pendingEntries.forEach(entry => codebookProductsRef.current.add(String(entry.code)));
+    const service = user.isAdmin ? getAdminProductByCode : getSecurityProductByCode;
+    let cancelled = false;
+    Promise.all(pendingEntries.map(async entry => {
+      try {
+        const data = await service(entry.code);
+        return [String(entry.code), data?.product || null];
+      } catch {
+        return [String(entry.code), null];
+      }
+    })).then(results => {
+      if (cancelled) return;
+      setCodebookProducts(current => ({
+        ...current,
+        ...Object.fromEntries(results)
+      }));
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [codebookData.entries, user]);
+
+  async function loadMoreCodebook() {
+    if (codebookLoading || codebookLoadingMore || codebookPage >= (codebookData.totalPages || 1)) return;
+    await refreshCodebook(codebookFilter, codebookPage + 1, true);
+  }
+
+  useEffect(() => {
+    const target = codebookLoadMoreRef.current;
+    const root = codebookFeedRef.current;
+    if (!target || !root) return undefined;
+    const observer = new IntersectionObserver(entries => {
+      if (entries[0]?.isIntersecting) void loadMoreCodebook();
+    }, { root, rootMargin: '500px 0px' });
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [codebookPage, codebookData.totalPages, codebookLoading, codebookLoadingMore, codebookFilter]);
+
+  async function openProductCard(articleCode) {
+    if (!articleCode) return;
+    setProductCardError('');
+    setProductCardLoading(true);
+    try {
+      const isAdminMode = Boolean(user?.isAdmin);
+      const data = isAdminMode
+        ? await getAdminProductByCode(articleCode)
+        : await getSecurityProductByCode(articleCode);
+      const entry = (codebookData.entries || []).find(item => String(item.code) === String(articleCode));
+      setProductCard({
+        articleCode: String(articleCode),
+        product: data?.product || codebookProducts[String(articleCode)] || null,
+        barcodes: Array.isArray(entry?.barcodes) ? entry.barcodes : [],
+        originalBarcodes: Array.isArray(entry?.barcodes) ? entry.barcodes : [],
+        editing: false
+      });
+    } catch (err) {
+      setProductCardError(err instanceof Error ? err.message : 'Не удалось загрузить карточку товара');
+      setProductCard({ articleCode: String(articleCode), barcodes: [], product: null, editing: false });
+    } finally {
+      setProductCardLoading(false);
+    }
+  }
+
+  async function saveProductCard() {
+    if (!productCard?.articleCode || productCardSaving) return;
+    setProductCardSaving(true);
+    setError('');
+    try {
+      const update = user?.isAdmin ? updateAdminCodebookEntry : updateSecurityCodebookEntry;
+      await update(productCard.articleCode, productCard.barcodes);
+      setProductCard(current => current ? { ...current, originalBarcodes: [...current.barcodes], editing: false } : current);
+      await refreshCodebook(codebookFilter, codebookPage);
+      setAdminSuccess(user?.isAdmin ? 'Связь кода товара сохранена' : 'Связь товара сохранена');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось сохранить связь кода товара');
+    } finally {
+      setProductCardSaving(false);
+    }
+  }
+
+  async function deleteProductCard(articleCode) {
+    if (!articleCode || productCardDeleting) return;
+    if (typeof window !== 'undefined' && !window.confirm(`Удалить связь для кода ${articleCode}?`)) return;
+    setProductCardDeleting(true);
+    setError('');
+    try {
+      const remove = user?.isAdmin ? deleteAdminCodebookEntry : deleteSecurityCodebookEntry;
+      await remove(articleCode);
+      setProductCard(null);
+      await refreshCodebook(codebookFilter, codebookPage);
+      setAdminSuccess(user?.isAdmin ? 'Связь кода товара удалена' : 'Связь товара удалена');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось удалить связь кода товара');
+    } finally {
+      setProductCardDeleting(false);
     }
   }
 
@@ -748,7 +1252,9 @@ export default function App() {
     setAdminUsers([]);
     setAdminLogLevel('all');
     setAdminLogEntries([]);
+    setAdminLogUsers([]);
     setAdminLogCounts({});
+    setAdminLogGroupCounts({});
     setPatchNotes([]);
     setPatchNotesError('');
     setExpandedPatchNotes({});
@@ -756,6 +1262,13 @@ export default function App() {
     setActiveRecount(null);
     setValues({});
     setSearch('');
+    setAuthInviteBanner(null);
+    setHomeInviteNotice('');
+    setReferralCodeInput('');
+    setReferralStatus({ tone: '', message: '' });
+    setSecurityReferralData(null);
+    setSecurityReferralError('');
+    setSecurityReferralStatus({ tone: '', message: '' });
     setMenuOpen(false);
     setMismatchModalOpen(false);
     setCompleteModalOpen(false);
@@ -1027,6 +1540,21 @@ export default function App() {
     setTsdOpen(false);
     setTsdResult(null);
     setTsdPriceModalOpen(false);
+  }
+
+  function openCodebook() {
+    scanner.stopScanner();
+    window.history.pushState({}, '', '/codebook');
+    setCodebookOpen(true);
+    setAdminTab('users');
+    setHomeTab('recounts');
+    setProductCard(null);
+  }
+
+  function closeCodebook() {
+    window.history.replaceState({}, '', '/');
+    setCodebookOpen(false);
+    setProductCard(null);
   }
 
   function closeKeypadLab() {
@@ -1378,6 +1906,9 @@ export default function App() {
   function openSettings() {
     setDefaultCounterNameInput(user?.defaultCounterName || '');
     setSettingsOpen(true);
+    if (isSecurityUserRole(user)) {
+      void refreshSecurityReferralData(user);
+    }
   }
 
   function closeSettings() {
@@ -1402,6 +1933,32 @@ export default function App() {
     return <KeypadSandboxPage onClose={closeKeypadLab} />;
   }
 
+  const codebookPageProps = {
+    user,
+    error,
+    codebookData,
+    codebookFilter,
+    setCodebookFilter,
+    codebookPage,
+    codebookLoading,
+    codebookLoadingMore,
+    codebookProducts,
+    codebookFeedRef,
+    codebookLoadMoreRef,
+    codebookSearch,
+    setCodebookSearch,
+    openProductCard,
+    productCard,
+    setProductCard,
+    productCardLoading,
+    productCardError,
+    productCardSaving,
+    productCardDeleting,
+    saveProductCard,
+    deleteProductCard,
+    closeCodebook
+  };
+
   if (!token && !tsdOpen) {
     return (
       <AuthPage
@@ -1415,11 +1972,14 @@ export default function App() {
         authError={authError}
         setAuthError={setAuthError}
         handleAuthSubmit={handleAuthSubmit}
+        inviteBanner={authInviteBanner}
+        clearPendingInvite={pendingInviteCode ? clearPendingInvite : null}
       />
     );
   }
 
   if (user?.isAdmin) {
+    if (codebookOpen) return <CodebookPage {...codebookPageProps} />;
     return (
       <AdminPage
         user={user}
@@ -1458,6 +2018,10 @@ export default function App() {
         setAdminLogVisibleLimit={setAdminLogVisibleLimit}
         adminLogVisibleLimit={adminLogVisibleLimit}
         adminLogCounts={adminLogCounts}
+        adminLogGroupCounts={adminLogGroupCounts}
+        adminLogGroup={adminLogGroup}
+        adminLogUsers={adminLogUsers}
+        adminLogSelectedUsers={adminLogSelectedUsers}
         filteredAdminLogs={filteredAdminLogs}
         copiedLogId={copiedLogId}
         copyLogToClipboard={copyLogToClipboard}
@@ -1490,6 +2054,35 @@ export default function App() {
         toggleDeviceBinding={toggleDeviceBinding}
         deleteUserAccount={deleteUserAccount}
         deletingUserId={deletingUserId}
+        updateUserSecurityRole={updateUserSecurityRole}
+        issueUserReferralCode={issueUserReferralCode}
+        copyUserInviteLink={copyUserInviteLink}
+        referralTrialDays={referralTrialDays}
+        setReferralTrialDays={setReferralTrialDays}
+        codebookData={codebookData}
+        codebookFilter={codebookFilter}
+        setCodebookFilter={setCodebookFilter}
+        codebookPage={codebookPage}
+        setCodebookPage={setCodebookPage}
+        codebookLoading={codebookLoading}
+        codebookLoadingMore={codebookLoadingMore}
+        codebookProducts={codebookProducts}
+        codebookFeedRef={codebookFeedRef}
+        codebookLoadMoreRef={codebookLoadMoreRef}
+        refreshCodebook={refreshCodebook}
+        openProductCard={openProductCard}
+        productCard={productCard}
+        setProductCard={setProductCard}
+        codebookSearch={codebookSearch}
+        setCodebookSearch={setCodebookSearch}
+        productCardLoading={productCardLoading}
+        productCardError={productCardError}
+        productCardSaving={productCardSaving}
+        productCardDeleting={productCardDeleting}
+        saveProductCard={saveProductCard}
+        deleteProductCard={deleteProductCard}
+        codebookConflictOnly={codebookFilter === 'conflict'}
+        openCodebook={openCodebook}
       />
     );
   }
@@ -1499,8 +2092,19 @@ export default function App() {
       <SubscriptionExpiredPage
         user={user}
         handleLogout={handleLogout}
+        referralCode={referralCodeInput}
+        setReferralCode={setReferralCodeInput}
+        referralActivating={referralActivating}
+        activateReferral={activateReferralManually}
+        referralStatus={referralStatus}
+        pendingInviteCode={pendingInviteCode}
+        clearPendingInvite={clearPendingInvite}
       />
     );
+  }
+
+  if (codebookOpen && user && isSecurityUserRole(user)) {
+    return <CodebookPage {...codebookPageProps} />;
   }
 
   if (tsdOpen) {
@@ -1564,6 +2168,37 @@ export default function App() {
         setFeedbackSoundEnabled={setFeedbackSoundEnabled}
         saveAccountSettings={saveAccountSettings}
         settingsSaving={settingsSaving}
+        isSecurityUser={isSecurityUserRole(user)}
+        securityReferralData={securityReferralData}
+        securityReferralLoading={securityReferralLoading}
+        securityReferralError={securityReferralError}
+        securityReferralStatus={securityReferralStatus}
+        refreshSecurityReferralData={refreshSecurityReferralData}
+        copySecurityInviteLink={copySecurityInviteLink}
+        inviteNotice={homeInviteNotice}
+        codebookData={codebookData}
+        codebookFilter={codebookFilter}
+        setCodebookFilter={setCodebookFilter}
+        codebookPage={codebookPage}
+        setCodebookPage={setCodebookPage}
+        codebookLoading={codebookLoading}
+        codebookLoadingMore={codebookLoadingMore}
+        codebookProducts={codebookProducts}
+        codebookFeedRef={codebookFeedRef}
+        codebookLoadMoreRef={codebookLoadMoreRef}
+        refreshCodebook={refreshCodebook}
+        openProductCard={openProductCard}
+        productCard={productCard}
+        setProductCard={setProductCard}
+        codebookSearch={codebookSearch}
+        setCodebookSearch={setCodebookSearch}
+        productCardLoading={productCardLoading}
+        productCardError={productCardError}
+        productCardSaving={productCardSaving}
+        productCardDeleting={productCardDeleting}
+        saveProductCard={saveProductCard}
+        deleteProductCard={deleteProductCard}
+        openCodebook={openCodebook}
       />
     );
   }

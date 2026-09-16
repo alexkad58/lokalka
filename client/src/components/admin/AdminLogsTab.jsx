@@ -9,6 +9,15 @@ const ADMIN_LOG_LEVEL_TABS = [
   { key: 'trace', label: 'Trace' }
 ];
 
+const ADMIN_LOG_GROUP_TABS = [
+  { key: 'all', label: 'Все события' },
+  { key: 'recount', label: 'Просчёты' },
+  { key: 'scanner', label: 'Сканер' },
+  { key: 'admin', label: 'Админка' },
+  { key: 'auth', label: 'Входы' },
+  { key: 'other', label: 'Прочее' }
+];
+
 export default function AdminLogsTab({
   adminLogLevel,
   refreshAdminLogs,
@@ -19,10 +28,19 @@ export default function AdminLogsTab({
   adminLogVisibleLimit,
   totalLogsCount,
   adminLogCounts,
+  adminLogGroupCounts,
+  adminLogGroup,
+  adminLogUsers,
+  adminLogSelectedUsers,
   filteredAdminLogs,
   copiedLogId,
   copyLogToClipboard
 }) {
+  const selectedUserSet = new Set(adminLogSelectedUsers || []);
+  const selectedUsersLabel = selectedUserSet.size > 0
+    ? `Пользователи: ${selectedUserSet.size}`
+    : 'Пользователи: все';
+
   return (
     <section className="panel admin-panel-section">
       <div className="admin-section-header">
@@ -62,6 +80,73 @@ export default function AdminLogsTab({
             );
           })}
         </div>
+
+        <div className="admin-log-tabs admin-log-group-tabs">
+          {ADMIN_LOG_GROUP_TABS.map(tab => {
+            const key = tab.key;
+            const count = key === 'all'
+              ? totalLogsCount
+              : Number(adminLogGroupCounts?.[key] || 0);
+            const isActive = adminLogGroup === key;
+
+            return (
+              <button
+                key={key}
+                type="button"
+                className={`admin-log-tab ${isActive ? 'active' : ''}`}
+                onClick={() => {
+                  setAdminLogVisibleLimit(50);
+                  setAdminLogSearch('');
+                  refreshAdminLogs(adminLogLevel, key, adminLogSelectedUsers);
+                }}
+                disabled={adminLogLoading}
+              >
+                {tab.label} <span className="admin-tab-count">{count}</span>
+              </button>
+            );
+          })}
+        </div>
+
+        <details className="admin-log-user-filter">
+          <summary>{selectedUsersLabel}</summary>
+          <div className="admin-log-user-menu">
+            <button
+              type="button"
+              className="ghost mini-btn"
+              onClick={() => {
+                setAdminLogVisibleLimit(50);
+                setAdminLogSearch('');
+                refreshAdminLogs(adminLogLevel, adminLogGroup, []);
+              }}
+              disabled={adminLogLoading || selectedUserSet.size === 0}
+            >
+              Сбросить выбор
+            </button>
+            {(adminLogUsers || []).map(item => {
+              const checked = selectedUserSet.has(item.key);
+              const nextUsers = checked
+                ? (adminLogSelectedUsers || []).filter(key => key !== item.key)
+                : [...(adminLogSelectedUsers || []), item.key];
+
+              return (
+                <label key={item.key} className="admin-log-user-option">
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={() => {
+                      setAdminLogVisibleLimit(50);
+                      setAdminLogSearch('');
+                      refreshAdminLogs(adminLogLevel, adminLogGroup, nextUsers);
+                    }}
+                    disabled={adminLogLoading}
+                  />
+                  <span>{item.login}</span>
+                  <span className="admin-tab-count">{item.count}</span>
+                </label>
+              );
+            })}
+          </div>
+        </details>
 
         <div className="admin-search-wrapper">
           <input

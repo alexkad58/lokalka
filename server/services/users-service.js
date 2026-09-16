@@ -64,8 +64,11 @@ export function createUsersService({
       passwordHash: hashPassword(adminPassword),
       createdAt: toIsoNow(),
       isAdmin: true,
+      securityRole: false,
       subscriptionUntil: null,
-      deviceId: null
+      deviceId: null,
+      referralUsedAt: null,
+      referralActivationId: null
     });
     return true;
   }
@@ -100,11 +103,15 @@ export function createUsersService({
       login: user.login,
       createdAt: user.createdAt,
       isAdmin: Boolean(user.isAdmin),
+      securityRole: Boolean(user.securityRole),
+      role: user.securityRole ? 'security' : 'user',
       subscriptionUntil: user.subscriptionUntil || null,
       subscriptionActive: hasActiveSubscription(user),
       deviceBound: Boolean(user.deviceId),
       deviceBindingDisabled: Boolean(user.deviceBindingDisabled),
       defaultCounterName: user.defaultCounterName || '',
+      referralUsedAt: user.referralUsedAt || null,
+      referralActivationId: user.referralActivationId || null,
       supportLinks: getSupportLinks()
     };
   }
