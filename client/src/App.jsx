@@ -8,6 +8,7 @@ import {
 } from '../../shared/recount-utils.js';
 import { markCompletionSurveyPending, track } from './analytics';
 import {
+  activateReferralCode,
   activateUserSubscription,
   bindBarcodeToItem,
   completeRecount,
@@ -22,6 +23,7 @@ import {
   getAdminPatchNotes,
   getAdminShopApiSettings,
   getAdminUsers,
+  getMyReferralStats,
   getPatchNotes,
   getRecount,
   getRecounts,
@@ -34,7 +36,9 @@ import {
   resolveBarcode,
   saveRecountProgress,
   setAuthToken,
+  setUserSecurityRole,
   setUserDeviceBindingDisabled,
+  issueUserReferralCode as issueUserReferralCodeApi,
   updateAccountSettings,
   updateAdminContactLinks,
   updateAdminPatchNote,
@@ -78,7 +82,82 @@ import RecountPage from './components/recount/RecountPage.jsx';
 import KeypadSandboxPage from './KeypadSandboxPage.jsx';
 
 const TOKEN_KEY = 'lokalka_auth_token';
+const PENDING_INVITE_KEY = 'lokalka_pending_invite';
 const AUTOSAVE_INTERVAL_MS = 8000;
+
+function normalizeInviteCode(rawValue) {
+  return String(rawValue || '')
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, '')
+    .slice(0, 20);
+}
+
+function getInviteFromUrl() {
+  if (typeof window === 'undefined') return '';
+  const params = new URLSearchParams(window.location.search);
+  return normalizeInviteCode(params.get('invite'));
+}
+
+function buildInviteLink(inviteCode) {
+  if (typeof window === 'undefined') return '';
+  const code = normalizeInviteCode(inviteCode);
+  if (!code) return '';
+  const url = new URL(window.location.origin);
+  url.pathname = '/';
+  url.searchParams.set('invite', code);
+  return url.toString();
+}
+
+async function copyTextWithFallback(rawText) {
+  const text = String(rawText || '');
+  if (!text) {
+    return { ok: false, error: 'Пустую ссылку скопировать нельзя.' };
+  }
+
+  if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return { ok: true };
+    } catch {
+      // Fallback below for denied permissions or insecure context.
+    }
+  }
+
+  if (typeof document === 'undefined') {
+    return { ok: false, error: 'Буфер обмена недоступен в этом окружении.' };
+  }
+
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.setAttribute('readonly', 'true');
+  textarea.style.position = 'fixed';
+  textarea.style.opacity = '0';
+  textarea.style.pointerEvents = 'none';
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+
+  try {
+    const copied = document.execCommand('copy');
+    if (!copied) {
+      return { ok: false, error: 'Не удалось скопировать ссылку. Скопируйте ее вручную.' };
+    }
+    return { ok: true };
+  } catch {
+    return { ok: false, error: 'Не удалось скопировать ссылку. Скопируйте ее вручную.' };
+  } finally {
+    textarea.remove();
+  }
+}
+
+function isSecurityUserRole(account) {
+  return Boolean(account?.securityRole || account?.role === 'security' || account?.role === 'sb' || account?.isSecurity || account?.isSb);
+}
+
+function hasUsedReferralCode(account) {
+  return Boolean(account?.referralUsedAt || account?.usedReferralCode || account?.hasUsedReferral || account?.referralActivationId);
+}
 
 function buildProgressPayload(values, search, barcodeCache) {
   return {
@@ -125,9 +204,11 @@ export default function App() {
   const [authPassword, setAuthPassword] = useState('');
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState('');
+  const [authInviteBanner, setAuthInviteBanner] = useState(null);
 
   const [homeLoading, setHomeLoading] = useState(false);
   const [homeTab, setHomeTab] = useState('recounts');
+  const [homeInviteNotice, setHomeInviteNotice] = useState('');
   const [activeSummary, setActiveSummary] = useState(null);
   const [previousRecounts, setPreviousRecounts] = useState([]);
   const [patchNotes, setPatchNotes] = useState([]);
@@ -165,6 +246,7 @@ export default function App() {
   const [adminNewPatchNoteOpen, setAdminNewPatchNoteOpen] = useState(false);
   const [adminSuccess, setAdminSuccess] = useState('');
   const [copiedLogId, setCopiedLogId] = useState('');
+  const [referralTrialDays, setReferralTrialDays] = useState(1);
 
   const [activeRecount, setActiveRecount] = useState(null);
   const [values, setValues] = useState({});
@@ -194,6 +276,17 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [defaultCounterNameInput, setDefaultCounterNameInput] = useState('');
   const [settingsSaving, setSettingsSaving] = useState(false);
+  const [pendingInviteCode, setPendingInviteCode] = useState(() => {
+    if (typeof localStorage === 'undefined') return '';
+    return normalizeInviteCode(localStorage.getItem(PENDING_INVITE_KEY));
+  });
+  const [referralCodeInput, setReferralCodeInput] = useState('');
+  const [referralActivating, setReferralActivating] = useState(false);
+  const [referralStatus, setReferralStatus] = useState({ tone: '', message: '' });
+  const [securityReferralData, setSecurityReferralData] = useState(null);
+  const [securityReferralLoading, setSecurityReferralLoading] = useState(false);
+  const [securityReferralError, setSecurityReferralError] = useState('');
+  const [securityReferralStatus, setSecurityReferralStatus] = useState({ tone: '', message: '' });
   const [feedbackSoundEnabled, setFeedbackSoundEnabled] = useState(() => (
     localStorage.getItem(FEEDBACK_SOUND_STORAGE_KEY) !== '0'
   ));
@@ -219,6 +312,7 @@ export default function App() {
   const itemCardRefs = useRef(new Map());
   const keypadRef = useRef(null);
   const blurGuardUntilRef = useRef(0);
+  const autoInviteAttemptRef = useRef('');
 
   const handleScannedCode = useCallback(async (code) => {
     const rawCode = String(code || '').trim();
@@ -349,15 +443,58 @@ export default function App() {
   }, [activeFactCode]);
 
   useEffect(() => {
+    captureInviteFromUrl();
+  }, []);
+
+  useEffect(() => {
     const handlePopState = () => {
       const path = window.location.pathname;
       setTsdOpen(path === '/tsd');
       setKeypadLabOpen(path === '/keypad-lab');
+      captureInviteFromUrl();
     };
 
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
-  }, []);
+  }, [pendingInviteCode]);
+
+  useEffect(() => {
+    if (token || !pendingInviteCode) return;
+    setAuthInviteBanner({
+      tone: '',
+      code: pendingInviteCode,
+      message: 'Приглашение сохранено. Войдите или зарегистрируйтесь, чтобы применить код.'
+    });
+  }, [token, pendingInviteCode]);
+
+  useEffect(() => {
+    if (!user || !pendingInviteCode || user.isAdmin) {
+      setHomeInviteNotice('');
+      return;
+    }
+
+    if (user.subscriptionActive) {
+      setHomeInviteNotice('Приглашение не применено: подписка уже активна.');
+      return;
+    }
+
+    if (hasUsedReferralCode(user)) {
+      setHomeInviteNotice('Приглашение не применено: для этого аккаунта код уже использован ранее.');
+      if (!user.subscriptionActive) {
+        setReferralStatus({
+          tone: '',
+          message: 'Приглашение не применено: для этого аккаунта реферальный код уже использован ранее.'
+        });
+      }
+      return;
+    }
+
+    const attemptKey = `${user.id}:${pendingInviteCode}`;
+    if (autoInviteAttemptRef.current === attemptKey) return;
+    autoInviteAttemptRef.current = attemptKey;
+
+    void applyReferralCode(pendingInviteCode, true);
+  }, [user, pendingInviteCode]);
 
   useEffect(() => {
     if (!tsdResult?.raw) {
@@ -601,6 +738,186 @@ export default function App() {
     }
   }
 
+  function setStoredPendingInvite(code) {
+    const normalized = normalizeInviteCode(code);
+    if (typeof localStorage !== 'undefined') {
+      if (normalized) {
+        localStorage.setItem(PENDING_INVITE_KEY, normalized);
+      } else {
+        localStorage.removeItem(PENDING_INVITE_KEY);
+      }
+    }
+    setPendingInviteCode(normalized);
+    return normalized;
+  }
+
+  function clearPendingInvite() {
+    setStoredPendingInvite('');
+    setAuthInviteBanner(null);
+    autoInviteAttemptRef.current = '';
+  }
+
+  function getReferralErrorMessage(err) {
+    const code = String(err?.payload?.code || '').toUpperCase();
+    if (code === 'REFERRAL_EXPIRED') return 'Срок действия кода истек.';
+    if (code === 'REFERRAL_REVOKED') return 'Код был отозван и больше не действует.';
+    if (code === 'REFERRAL_ALREADY_USED') return 'Код уже использован этим пользователем.';
+    if (code === 'REFERRAL_BLOCKED' || code === 'REFERRAL_RATE_LIMIT') return 'Слишком много попыток. Попробуйте позже.';
+    if (code === 'REFERRAL_INVALID') return 'Код недействителен или недоступен.';
+
+    const text = String(err?.message || '').toLowerCase();
+    if (text.includes('просроч') || text.includes('истек')) return 'Срок действия кода истек.';
+    if (text.includes('отозван')) return 'Код был отозван и больше не действует.';
+    if (text.includes('использ')) return 'Код уже использован этим пользователем.';
+    if (text.includes('блок') || text.includes('лимит')) return 'Слишком много попыток. Попробуйте позже.';
+    if (text.includes('невалид') || text.includes('недейств')) return 'Код недействителен или недоступен.';
+    return 'Не удалось активировать код. Проверьте его и попробуйте еще раз.';
+  }
+
+  function captureInviteFromUrl() {
+    const inviteFromUrl = getInviteFromUrl();
+    if (!inviteFromUrl) return;
+
+    if (pendingInviteCode && pendingInviteCode !== inviteFromUrl) {
+      setAuthInviteBanner({
+        tone: '',
+        code: pendingInviteCode,
+        message: 'Уже сохранено приглашение. Очистите текущее, если нужно применить другой код.'
+      });
+      return;
+    }
+
+    const stored = setStoredPendingInvite(inviteFromUrl);
+    if (!stored) return;
+
+    setAuthInviteBanner({
+      tone: '',
+      code: stored,
+      message: 'Найдено приглашение по ссылке. Код будет применен после входа или регистрации.'
+    });
+    setReferralStatus({ tone: '', message: '' });
+  }
+
+  async function refreshSecurityReferralData(account = user) {
+    if (!isSecurityUserRole(account)) return;
+    setSecurityReferralLoading(true);
+    setSecurityReferralError('');
+    setSecurityReferralStatus({ tone: '', message: '' });
+    try {
+      const data = await getMyReferralStats();
+      const nextData = data?.referral || data || null;
+      setSecurityReferralData(nextData);
+    } catch (err) {
+      setSecurityReferralError(err instanceof Error ? err.message : 'Не удалось загрузить статистику СБ');
+    } finally {
+      setSecurityReferralLoading(false);
+    }
+  }
+
+  async function applyReferralCode(rawCode, automatic = false) {
+    const code = normalizeInviteCode(rawCode);
+    if (!code) {
+      setReferralStatus({ tone: 'error', message: 'Введите корректный код из букв и цифр.' });
+      return false;
+    }
+
+    setReferralActivating(true);
+    setReferralStatus({ tone: '', message: automatic ? 'Пробуем активировать приглашение...' : '' });
+
+    try {
+      const result = await activateReferralCode({ code });
+      const nextUser = result?.user || null;
+      if (nextUser) {
+        setUser(nextUser);
+      }
+
+      setStoredPendingInvite('');
+      setReferralCodeInput('');
+      setAuthInviteBanner({ tone: 'success', code: '', message: 'Код приглашения успешно применен.' });
+      setReferralStatus({ tone: 'success', message: 'Пробный доступ активирован.' });
+
+      if (nextUser?.subscriptionActive) {
+        await Promise.all([refreshDashboard(), refreshPatchNotes()]);
+      }
+      return true;
+    } catch (err) {
+      setReferralStatus({ tone: 'error', message: getReferralErrorMessage(err) });
+      return false;
+    } finally {
+      setReferralActivating(false);
+    }
+  }
+
+  async function activateReferralManually() {
+    const success = await applyReferralCode(referralCodeInput, false);
+    if (success) {
+      setHomeInviteNotice('');
+    }
+  }
+
+  async function updateUserSecurityRole(targetUserId, enabled) {
+    setActivatingUserId(targetUserId);
+    setError('');
+    try {
+      await setUserSecurityRole(targetUserId, enabled);
+      showAdminSuccess(enabled ? 'Роль СБ назначена' : 'Роль СБ снята');
+      await refreshAdminUsers();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось изменить роль СБ');
+    } finally {
+      setActivatingUserId('');
+    }
+  }
+
+  async function issueUserReferralCode(targetUserId, regenerate) {
+    setActivatingUserId(targetUserId);
+    setError('');
+    try {
+      await issueUserReferralCodeApi(targetUserId, {
+        regenerate: Boolean(regenerate),
+        trialDays: Number(referralTrialDays) === 3 ? 3 : 1
+      });
+      showAdminSuccess(regenerate ? 'Код успешно перегенерирован' : 'Код успешно создан');
+      await refreshAdminUsers();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось выдать код приглашения');
+    } finally {
+      setActivatingUserId('');
+    }
+  }
+
+  async function copySecurityInviteLink() {
+    const code = normalizeInviteCode(securityReferralData?.code);
+    if (!code) {
+      setSecurityReferralError('Код не найден. Запросите выдачу у администратора.');
+      setSecurityReferralStatus({ tone: '', message: '' });
+      return;
+    }
+
+    const result = await copyTextWithFallback(buildInviteLink(code));
+    if (result.ok) {
+      setSecurityReferralError('');
+      setSecurityReferralStatus({ tone: 'success', message: 'Инвайт-ссылка скопирована.' });
+    } else {
+      setSecurityReferralStatus({ tone: 'error', message: result.error || 'Не удалось скопировать ссылку.' });
+    }
+  }
+
+  async function copyUserInviteLink(targetUser) {
+    const code = normalizeInviteCode(targetUser?.referralCode || targetUser?.securityReferralCode || targetUser?.referral?.code);
+    if (!code) {
+      setError('У пользователя пока нет кода приглашения.');
+      return;
+    }
+
+    const result = await copyTextWithFallback(buildInviteLink(code));
+    if (result.ok) {
+      showAdminSuccess('Инвайт-ссылка скопирована');
+    } else {
+      setError(result.error || 'Не удалось скопировать ссылку');
+    }
+  }
+
   async function refreshDashboard() {
     setHomeLoading(true);
     setError('');
@@ -756,6 +1073,13 @@ export default function App() {
     setActiveRecount(null);
     setValues({});
     setSearch('');
+    setAuthInviteBanner(null);
+    setHomeInviteNotice('');
+    setReferralCodeInput('');
+    setReferralStatus({ tone: '', message: '' });
+    setSecurityReferralData(null);
+    setSecurityReferralError('');
+    setSecurityReferralStatus({ tone: '', message: '' });
     setMenuOpen(false);
     setMismatchModalOpen(false);
     setCompleteModalOpen(false);
@@ -1378,6 +1702,9 @@ export default function App() {
   function openSettings() {
     setDefaultCounterNameInput(user?.defaultCounterName || '');
     setSettingsOpen(true);
+    if (isSecurityUserRole(user)) {
+      void refreshSecurityReferralData(user);
+    }
   }
 
   function closeSettings() {
@@ -1415,6 +1742,8 @@ export default function App() {
         authError={authError}
         setAuthError={setAuthError}
         handleAuthSubmit={handleAuthSubmit}
+        inviteBanner={authInviteBanner}
+        clearPendingInvite={pendingInviteCode ? clearPendingInvite : null}
       />
     );
   }
@@ -1490,6 +1819,11 @@ export default function App() {
         toggleDeviceBinding={toggleDeviceBinding}
         deleteUserAccount={deleteUserAccount}
         deletingUserId={deletingUserId}
+        updateUserSecurityRole={updateUserSecurityRole}
+        issueUserReferralCode={issueUserReferralCode}
+        copyUserInviteLink={copyUserInviteLink}
+        referralTrialDays={referralTrialDays}
+        setReferralTrialDays={setReferralTrialDays}
       />
     );
   }
@@ -1499,6 +1833,13 @@ export default function App() {
       <SubscriptionExpiredPage
         user={user}
         handleLogout={handleLogout}
+        referralCode={referralCodeInput}
+        setReferralCode={setReferralCodeInput}
+        referralActivating={referralActivating}
+        activateReferral={activateReferralManually}
+        referralStatus={referralStatus}
+        pendingInviteCode={pendingInviteCode}
+        clearPendingInvite={clearPendingInvite}
       />
     );
   }
@@ -1564,6 +1905,14 @@ export default function App() {
         setFeedbackSoundEnabled={setFeedbackSoundEnabled}
         saveAccountSettings={saveAccountSettings}
         settingsSaving={settingsSaving}
+        isSecurityUser={isSecurityUserRole(user)}
+        securityReferralData={securityReferralData}
+        securityReferralLoading={securityReferralLoading}
+        securityReferralError={securityReferralError}
+        securityReferralStatus={securityReferralStatus}
+        refreshSecurityReferralData={refreshSecurityReferralData}
+        copySecurityInviteLink={copySecurityInviteLink}
+        inviteNotice={homeInviteNotice}
       />
     );
   }

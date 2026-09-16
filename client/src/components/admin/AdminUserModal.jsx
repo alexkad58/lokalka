@@ -9,12 +9,21 @@ export default function AdminUserModal({
   resetDeviceBindingForUser,
   toggleDeviceBinding,
   deleteUserAccount,
-  deletingUserId
+  deletingUserId,
+  updateUserSecurityRole,
+  issueUserReferralCode,
+  copyUserInviteLink,
+  referralTrialDays,
+  setReferralTrialDays
 }) {
   if (!expandedUserId) return null;
   const targetUser = adminUsers.find(item => item.id === expandedUserId);
   if (!targetUser) return null;
   const daysRemaining = getUserDaysRemaining(targetUser);
+  const isBusy = activatingUserId === targetUser.id;
+  const securityRoleEnabled = Boolean(targetUser?.securityRole || targetUser?.role === 'security' || targetUser?.role === 'sb' || targetUser?.isSecurity || targetUser?.isSb);
+  const referralCode = String(targetUser?.referralCode || targetUser?.securityReferralCode || targetUser?.referral?.code || '').trim();
+  const referralTrial = Number(targetUser?.referralTrialDays || targetUser?.referral?.trialDays || referralTrialDays || 1);
 
   return (
     <div className="modal-backdrop" onClick={() => setExpandedUserId('')}>
@@ -61,6 +70,79 @@ export default function AdminUserModal({
 
         {!targetUser.isAdmin ? (
           <div className="admin-modal-section">
+            <h4>Роль СБ и реферальный код</h4>
+            <div className="admin-account-actions">
+              <button
+                type="button"
+                className="ghost"
+                onClick={() => updateUserSecurityRole(targetUser.id, !securityRoleEnabled)}
+                disabled={isBusy}
+              >
+                {securityRoleEnabled ? 'Снять роль СБ' : 'Назначить роль СБ'}
+              </button>
+            </div>
+            {securityRoleEnabled ? (
+              <>
+                <div className="admin-referral-days-row">
+                  <span className="line mini">Срок триала по коду:</span>
+                  <div className="admin-days-presets">
+                    {[1, 3].map(day => (
+                      <button
+                        key={day}
+                        type="button"
+                        className={`admin-day-btn ${Number(referralTrialDays) === day ? 'active' : ''}`}
+                        onClick={() => setReferralTrialDays(day)}
+                        disabled={isBusy}
+                      >
+                        {day} дн.
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                {referralCode ? (
+                  <div className="admin-referral-code-block">
+                    <div className="line mini">Текущий код: <strong>{referralCode}</strong></div>
+                    <div className="line mini">Текущий срок: {referralTrial} дн.</div>
+                  </div>
+                ) : (
+                  <div className="line mini text-muted">Код еще не создан</div>
+                )}
+                <div className="admin-account-actions">
+                  <button
+                    type="button"
+                    className="ghost"
+                    onClick={() => issueUserReferralCode(targetUser.id, false)}
+                    disabled={isBusy}
+                  >
+                    Создать код
+                  </button>
+                  <button
+                    type="button"
+                    className="ghost"
+                    onClick={() => issueUserReferralCode(targetUser.id, true)}
+                    disabled={isBusy}
+                  >
+                    Перегенерировать
+                  </button>
+                </div>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => copyUserInviteLink(targetUser)}
+                  disabled={!referralCode}
+                >
+                  Копировать инвайт-ссылку
+                </button>
+                <div className="line mini text-warning">
+                  Внимание: перегенерация сразу отключает старый код и старые ссылки.
+                </div>
+              </>
+            ) : null}
+          </div>
+        ) : null}
+
+        {!targetUser.isAdmin ? (
+          <div className="admin-modal-section">
             <h4>Продление подписки</h4>
             <div className="admin-modal-quick-activate">
               {[30, 90, 180, 365].map(d => (
@@ -69,7 +151,7 @@ export default function AdminUserModal({
                   type="button"
                   className="ghost"
                   onClick={() => activateSubscriptionForUser(targetUser.id, d)}
-                  disabled={activatingUserId === targetUser.id}
+                  disabled={isBusy}
                 >
                   +{d} дн.
                 </button>
@@ -85,16 +167,16 @@ export default function AdminUserModal({
               type="button"
               className="ghost"
               onClick={() => resetDeviceBindingForUser(targetUser.id)}
-              disabled={activatingUserId === targetUser.id}
+              disabled={isBusy}
               title="Позволит пользователю авторизоваться с другого устройства"
             >
-              {activatingUserId === targetUser.id ? 'Подождите...' : '📱 Сбросить устройство'}
+              {isBusy ? 'Подождите...' : '📱 Сбросить устройство'}
             </button>
             <button
               type="button"
               className="ghost"
               onClick={() => toggleDeviceBinding(targetUser)}
-              disabled={targetUser.isAdmin || activatingUserId === targetUser.id}
+              disabled={targetUser.isAdmin || isBusy}
             >
               {targetUser.deviceBindingDisabled ? '🔒 Включить привязку' : '🔓 Отключить привязку'}
             </button>

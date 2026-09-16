@@ -12,6 +12,7 @@ process.env.ADMIN_LOGIN = 'admin';
 process.env.ADMIN_PASSWORD = 'admin-test-password';
 process.env.LOKALKA_DATA_FILE = path.join(tempDir, 'storage.json');
 process.env.LOKALKA_BARCODE_CACHE_FILE = path.join(tempDir, 'barcode-cache.json');
+process.env.LOKALKA_PATCHNOTES_FILE = path.join(tempDir, 'patchnotes.json');
 
 const { app, initializeServer } = await import('../server/server.js');
 
@@ -66,6 +67,8 @@ function multipartFilePayload(fileBuffer) {
 let adminToken;
 let userToken;
 let userId;
+let securityToken;
+let securityUserId;
 
 before(async () => {
   await initializeServer();
@@ -339,6 +342,87 @@ test('service and validation errors keep their status codes', async () => {
     headers: authHeaders(userToken, 'device-a')
   });
   assert.equal(missingPdfResponse.statusCode, 406);
+});
+
+test('referral flow supports security role setup, activation and isolated stats', async () => {
+  const securityRegister = await jsonRequest(
+    'POST',
+    '/api/auth/register',
+    { login: 'security-user', password: 'security-password' },
+    { 'x-device-id': 'device-security' }
+  );
+  assert.equal(securityRegister.statusCode, 200);
+  securityToken = responseJson(securityRegister).token;
+  securityUserId = responseJson(securityRegister).user.id;
+
+  const setRoleResponse = await jsonRequest(
+    'POST',
+    `/api/admin/users/${securityUserId}/security-role`,
+    { enabled: true },
+    authHeaders(adminToken, 'admin-device')
+  );
+  assert.equal(setRoleResponse.statusCode, 200);
+  assert.equal(responseJson(setRoleResponse).user.securityRole, true);
+
+  const issueCodeResponse = await jsonRequest(
+    'POST',
+    `/api/admin/users/${securityUserId}/referral-code`,
+    { trialDays: 1, regenerate: false },
+    authHeaders(adminToken, 'admin-device')
+  );
+  assert.equal(issueCodeResponse.statusCode, 200);
+  const referralCode = responseJson(issueCodeResponse).referral.code;
+  assert.ok(referralCode);
+
+  const inviteRegister = await jsonRequest(
+    'POST',
+    '/api/auth/register',
+    { login: 'invite-user', password: 'invite-password', invite: referralCode },
+    { 'x-device-id': 'device-invite' }
+  );
+  assert.equal(inviteRegister.statusCode, 200);
+  const invitedToken = responseJson(inviteRegister).token;
+  assert.equal(responseJson(inviteRegister).user.subscriptionActive, true);
+
+  const repeatApply = await jsonRequest(
+    'POST',
+    '/api/referrals/activate',
+    { code: referralCode, source: 'invite-auto' },
+    authHeaders(invitedToken, 'device-invite')
+  );
+  assert.equal(repeatApply.statusCode, 200);
+  assert.equal(responseJson(repeatApply).alreadyApplied, true);
+
+  const multipart = multipartFilePayload(await createSmokePdf());
+  const createResponse = await app.inject({
+    method: 'POST',
+    url: '/api/recounts/from-pdf',
+    headers: {
+      ...authHeaders(invitedToken, 'device-invite'),
+      'content-type': `multipart/form-data; boundary=${multipart.boundary}`
+    },
+    payload: multipart.payload
+  });
+  assert.equal(createResponse.statusCode, 200);
+  const recountId = responseJson(createResponse).recount.id;
+
+  const completeResponse = await jsonRequest(
+    'POST',
+    `/api/recounts/${recountId}/complete`,
+    { values: {}, withoutPdf: true },
+    authHeaders(invitedToken, 'device-invite')
+  );
+  assert.equal(completeResponse.statusCode, 200);
+
+  const statsResponse = await app.inject({
+    method: 'GET',
+    url: '/api/referrals/me',
+    headers: authHeaders(securityToken, 'device-security')
+  });
+  assert.equal(statsResponse.statusCode, 200);
+  assert.equal(responseJson(statsResponse).referral.code, referralCode);
+  assert.equal(responseJson(statsResponse).referral.activationsCount, 1);
+  assert.equal(responseJson(statsResponse).referral.completedRecountsTotal, 1);
 });
 
 test('recount lifecycle supports create, progress, complete, reopen and delete', async () => {

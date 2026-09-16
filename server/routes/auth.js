@@ -13,8 +13,37 @@ export function createAuthRoutes({
   tokenStorageKey,
   publicUser,
   authenticate,
-  buildRequestLogMeta
+  buildRequestLogMeta,
+  referralService
 }) {
+  async function applyInviteIfProvided({ user, inviteRaw, source, request }) {
+    const invite = referralService.normalizeReferralCode(inviteRaw);
+    if (!invite) return null;
+
+    try {
+      const result = await referralService.activateCode({
+        user,
+        rawCode: invite,
+        ip: getRequestIp(request),
+        source,
+        requestMeta: buildRequestLogMeta(request, {
+          inviteCodeMask: referralService.maskReferralCode(invite)
+        })
+      });
+      return {
+        ok: true,
+        status: result?.activation?.status || 'applied',
+        code: result?.alreadyApplied ? 'REFERRAL_ALREADY_USED' : undefined
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        code: String(error?.code || '').trim() || 'REFERRAL_FAILED',
+        error: error?.message || 'Не удалось применить приглашение'
+      };
+    }
+  }
+
   return async function authRoutes(app) {
     app.post('/api/auth/register', async (request, reply) => {
       const body = request.body && typeof request.body === 'object' ? request.body : {};
@@ -44,16 +73,20 @@ export function createAuthRoutes({
         passwordHash: hashPassword(password),
         createdAt: toIsoNow(),
         isAdmin: false,
+        securityRole: false,
         subscriptionUntil: null,
         deviceId,
-        deviceBindingDisabled: false
+        deviceBindingDisabled: false,
+        referralUsedAt: null,
+        referralActivationId: null
       };
       db.users.push(user);
       await saveDb();
       logEvent('info', 'register-success', { login: user.login, userId: user.id, ip: getRequestIp(request) });
 
       const token = await sessionManager.createForUser(user, request);
-      return { ok: true, token, tokenType: tokenStorageKey, user: publicUser(user) };
+      const referralActivation = await applyInviteIfProvided({ user, inviteRaw: body.invite, source: 'register-invite', request });
+      return { ok: true, token, tokenType: tokenStorageKey, user: publicUser(user), referralActivation };
     });
 
     app.post('/api/auth/login', async (request, reply) => {
@@ -84,7 +117,8 @@ export function createAuthRoutes({
 
       const token = await sessionManager.createForUser(user, request);
       logEvent('info', 'login-success', { actorId: user.id, actorLogin: user.login, actorIsAdmin: Boolean(user.isAdmin), ip: getRequestIp(request) });
-      return { ok: true, token, tokenType: tokenStorageKey, user: publicUser(user) };
+      const referralActivation = await applyInviteIfProvided({ user, inviteRaw: body.invite, source: 'login-invite', request });
+      return { ok: true, token, tokenType: tokenStorageKey, user: publicUser(user), referralActivation };
     });
 
     app.get('/api/auth/me', { preHandler: authenticate }, async request => ({

@@ -214,6 +214,19 @@ button.ghost {
   margin: 10px 0;
 }
 
+.subscription-referral-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.subscription-referral-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
 .settings-field {
   display: flex;
   flex-direction: column;
@@ -253,8 +266,9 @@ button.danger {
 }
 
 .home-subtabs {
-  display: inline-grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
   padding: 4px;
   border-radius: 12px;
@@ -262,10 +276,85 @@ button.danger {
 }
 
 .home-subtab {
-  min-width: 112px;
+  min-width: 104px;
   border-radius: 10px;
   padding: 8px 10px;
   background: transparent;
+}
+
+.security-referral-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.security-referral-inline-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.security-referral-code-row {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.security-referral-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.security-referral-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 1.15rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.security-referral-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.security-referral-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  background: rgba(12, 18, 28, 0.7);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.security-referral-table th,
+.security-referral-table td {
+  padding: 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  text-align: left;
+  font-size: 0.84rem;
+}
+
+.security-referral-table th {
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 0.76rem;
+}
+
+.security-referral-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.security-referral-state {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 .home-subtab.active {
@@ -566,6 +655,10 @@ button.danger {
   border-left: 3px solid #8b5cf6;
 }
 
+.admin-user-card.is-security:not(.is-admin) {
+  border-left: 3px solid #ef4444;
+}
+
 .admin-user-main {
   min-width: 0;
   display: flex;
@@ -648,6 +741,12 @@ button.danger {
   background: rgba(239, 68, 68, 0.2);
   color: #fca5a5;
   border: 1px solid rgba(239, 68, 68, 0.35);
+}
+
+.badge-security {
+  background: rgba(239, 68, 68, 0.2);
+  color: #fecaca;
+  border: 1px solid rgba(239, 68, 68, 0.38);
 }
 
 .text-success {
@@ -1017,6 +1116,21 @@ button.danger {
   gap: 8px;
 }
 
+.admin-referral-days-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.admin-referral-code-block {
+  background: rgba(9, 13, 21, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  padding: 8px 10px;
+}
+
 .status {
   background: rgba(18, 25, 38, 0.85);
   border: 1px solid rgba(255, 255, 255, 0.1);
@@ -1168,10 +1282,20 @@ button.danger {
 
   .home-subtabs {
     width: 100%;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .home-subtab {
     min-width: 0;
+  }
+
+  .security-referral-metrics {
+    grid-template-columns: 1fr;
+  }
+
+  .subscription-referral-actions {
+    grid-template-columns: 1fr;
   }
 
   .admin-tabs {
@@ -1613,6 +1737,20 @@ button.danger {
   margin: 0;
 }
 
+.settings-security-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 2px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.settings-security-panel h4 {
+  margin: 0;
+  font-size: 0.9rem;
+}
+
 .compact-table-wrap {
   max-height: min(60vh, 520px);
   overflow-y: auto;
@@ -1719,5 +1857,20 @@ button.danger {
 @media (min-width: 900px) {
   .scanner-viewport {
     height: 132px;
+  }
+}
+
+@media (max-width: 520px) {
+  .security-referral-code-row {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .security-referral-inline-row button {
+    width: 100%;
+  }
+
+  .security-referral-table {
+    table-layout: auto;
   }
 }

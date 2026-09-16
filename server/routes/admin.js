@@ -12,7 +12,8 @@ export function createAdminRoutes({
   tokenState,
   shopApiService,
   sessions,
-  getSupportLinks
+  getSupportLinks,
+  referralService
 }) {
   function normalizeSupportUrl(value, fallback) {
     const raw = String(value || '').trim();
@@ -31,20 +32,77 @@ export function createAdminRoutes({
         .sort((a, b) => a.login.localeCompare(b.login))
         .map(user => {
           const status = buildSubscriptionStatus(user);
+          const referral = referralService.enrichPublicUser(user);
           return {
             id: user.id,
             login: user.login,
             createdAt: user.createdAt,
             isAdmin: Boolean(user.isAdmin),
+            securityRole: referral.securityRole,
+            role: referral.role,
             subscriptionUntil: user.subscriptionUntil || null,
             subscriptionActive: hasActiveSubscription(user),
             deviceBound: Boolean(user.deviceId),
             deviceBindingDisabled: Boolean(user.deviceBindingDisabled),
+            referralUsedAt: referral.referralUsedAt,
+            referralActivationId: referral.referralActivationId,
+            referralCode: referral.referralCode,
+            referralTrialDays: referral.referralTrialDays,
             subscriptionStatusKey: status.key,
             subscriptionStatusLabel: status.label
           };
         })
     }));
+
+    app.post('/api/admin/users/:id/security-role', { preHandler: [authenticate, requireAdmin] }, async (request, reply) => {
+      const { id } = request.params;
+      const body = request.body && typeof request.body === 'object' ? request.body : {};
+      const target = db.users.find(user => user.id === id);
+      if (!target) return reply.code(404).send({ ok: false, error: 'Пользователь не найден' });
+      if (target.isAdmin) return reply.code(400).send({ ok: false, error: 'Нельзя назначить роль СБ администратору' });
+
+      const enabled = Boolean(body.enabled);
+      await referralService.setSecurityRole({
+        actor: request.user,
+        targetUser: target,
+        enabled,
+        requestMeta: buildRequestLogMeta(request)
+      });
+      return { ok: true, user: publicUser(target) };
+    });
+
+    app.post('/api/admin/users/:id/referral-code', { preHandler: [authenticate, requireAdmin] }, async (request, reply) => {
+      const { id } = request.params;
+      const body = request.body && typeof request.body === 'object' ? request.body : {};
+      const target = db.users.find(user => user.id === id);
+      if (!target) return reply.code(404).send({ ok: false, error: 'Пользователь не найден' });
+      if (target.isAdmin) return reply.code(400).send({ ok: false, error: 'Для администратора код не требуется' });
+
+      try {
+        const codeRecord = await referralService.issueCode({
+          actor: request.user,
+          targetUser: target,
+          trialDays: body.trialDays,
+          regenerate: Boolean(body.regenerate),
+          requestMeta: buildRequestLogMeta(request)
+        });
+        return {
+          ok: true,
+          referral: {
+            code: codeRecord.code,
+            trialDays: codeRecord.trialDays,
+            revokedAt: codeRecord.revokedAt || null
+          },
+          user: publicUser(target)
+        };
+      } catch (error) {
+        return reply.code(Number(error?.statusCode) || 400).send({
+          ok: false,
+          code: error?.code || undefined,
+          error: error?.message || 'Не удалось выдать код приглашения'
+        });
+      }
+    });
 
     app.get('/api/admin/shop-api', { preHandler: [authenticate, requireAdmin] }, async () => ({
       ok: true,
@@ -193,6 +251,15 @@ export function createAdminRoutes({
 
       db.users = db.users.filter(user => user.id !== target.id);
       db.recounts = db.recounts.filter(item => item.userId !== target.id);
+      if (db.referrals?.codes) {
+        const now = new Date().toISOString();
+        for (const code of db.referrals.codes) {
+          if (code.ownerUserId === target.id && !code.revokedAt) {
+            code.revokedAt = now;
+            code.revokeReason = 'owner-deleted';
+          }
+        }
+      }
       for (const [token, session] of sessions.entries()) {
         if (session?.userId === target.id) sessions.delete(token);
       }

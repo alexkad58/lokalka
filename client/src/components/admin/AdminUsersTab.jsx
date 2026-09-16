@@ -17,6 +17,8 @@ export default function AdminUsersTab({
   activateSubscriptionForUser,
   setExpandedUserId
 }) {
+  const isSecurityAccount = (account) => Boolean(account?.securityRole || account?.role === 'security' || account?.role === 'sb' || account?.isSecurity || account?.isSb);
+
   return (
     <section className="panel admin-panel-section">
       <div className="admin-section-header">
@@ -106,12 +108,15 @@ export default function AdminUsersTab({
           {filteredAdminUsers.map(item => {
             const daysRemaining = getUserDaysRemaining(item);
             const isActivating = activatingUserId === item.id;
+            const isSecurity = isSecurityAccount(item);
+            const cardClassName = `admin-user-card${item.isAdmin ? ' is-admin' : ''}${isSecurity ? ' is-security' : ''}`;
 
             return (
-              <article key={item.id} className={`admin-user-card ${item.isAdmin ? 'is-admin' : ''}`}>
+              <article key={item.id} className={cardClassName}>
                 <div className="admin-user-main">
                   <div className="admin-user-title-row">
                     <span className="admin-user-login">{item.login}</span>
+                    {isSecurity ? <span className="admin-badge badge-security">СБ</span> : null}
                     {item.isAdmin ? (
                       <span className="admin-badge badge-admin">👑 Администратор</span>
                     ) : item.subscriptionActive ? (

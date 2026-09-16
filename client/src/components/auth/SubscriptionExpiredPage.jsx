@@ -1,6 +1,16 @@
 import { formatSubscriptionStatusLabel } from '../../utils/formatting.js';
 
-export default function SubscriptionExpiredPage({ user, handleLogout }) {
+export default function SubscriptionExpiredPage({
+  user,
+  handleLogout,
+  referralCode,
+  setReferralCode,
+  referralActivating,
+  activateReferral,
+  referralStatus,
+  pendingInviteCode,
+  clearPendingInvite
+}) {
   const supportLinks = user?.supportLinks || {
     telegramUrl: 'https://t.me/alekseikb58',
     maxUrl: 'https://www.max.ru/'
@@ -29,6 +39,38 @@ export default function SubscriptionExpiredPage({ user, handleLogout }) {
           >
             Написать в MAX
           </button>
+        </div>
+
+        <div className="subscription-referral-box">
+          <div className="line">Есть код приглашения?</div>
+          <div className="subscription-referral-actions">
+            <input
+              type="text"
+              value={referralCode}
+              onChange={event => setReferralCode(event.target.value)}
+              placeholder="Введите код"
+              autoComplete="off"
+              maxLength={20}
+            />
+            <button
+              type="button"
+              onClick={activateReferral}
+              disabled={referralActivating}
+            >
+              {referralActivating ? 'Активация...' : 'Активировать'}
+            </button>
+          </div>
+          {pendingInviteCode ? (
+            <div className="line mini">
+              В ожидании код из ссылки: {pendingInviteCode}{' '}
+              <button type="button" className="ghost" onClick={clearPendingInvite}>Очистить</button>
+            </div>
+          ) : null}
+          {referralStatus?.message ? (
+            <div className={`status ${referralStatus.tone === 'error' ? 'error' : referralStatus.tone === 'success' ? 'success' : ''}`}>
+              {referralStatus.message}
+            </div>
+          ) : null}
         </div>
 
         <div className="status">Статус: {formatSubscriptionStatusLabel(user)}</div>

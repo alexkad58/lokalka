@@ -37,6 +37,16 @@ async function readJsonOrThrow(response, fallbackError) {
   return data;
 }
 
+async function readJsonWithErrorDetails(response, fallbackError) {
+  const data = await response.json().catch(() => ({}));
+  if (response.ok && data?.ok !== false) return data;
+
+  const error = new Error(data.error || fallbackError);
+  error.status = response.status;
+  error.payload = data;
+  throw error;
+}
+
 export function setAuthToken(token) {
   authToken = String(token || '').trim();
 }
@@ -188,6 +198,40 @@ export async function setUserDeviceBindingDisabled(userId, disabled) {
     body: JSON.stringify({ disabled })
   });
   return readJsonOrThrow(response, 'Не удалось изменить ограничение привязки');
+}
+
+export async function setUserSecurityRole(userId, enabled) {
+  const response = await fetch(`/api/admin/users/${encodeURIComponent(userId)}/security-role`, {
+    method: 'POST',
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ enabled })
+  });
+  return readJsonOrThrow(response, 'Не удалось изменить роль СБ');
+}
+
+export async function issueUserReferralCode(userId, payload = {}) {
+  const response = await fetch(`/api/admin/users/${encodeURIComponent(userId)}/referral-code`, {
+    method: 'POST',
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify(payload || {})
+  });
+  return readJsonOrThrow(response, 'Не удалось выдать код приглашения');
+}
+
+export async function getMyReferralStats() {
+  const response = await fetch('/api/referrals/me', {
+    headers: authHeaders()
+  });
+  return readJsonOrThrow(response, 'Не удалось загрузить данные по коду СБ');
+}
+
+export async function activateReferralCode(payload = {}) {
+  const response = await fetch('/api/referrals/activate', {
+    method: 'POST',
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify(payload || {})
+  });
+  return readJsonWithErrorDetails(response, 'Не удалось активировать код приглашения');
 }
 
 export async function deleteRecount(id) {

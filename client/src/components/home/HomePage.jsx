@@ -34,7 +34,15 @@ export default function HomePage({
   feedbackSoundEnabled,
   setFeedbackSoundEnabled,
   saveAccountSettings,
-  settingsSaving
+  settingsSaving,
+  isSecurityUser,
+  securityReferralData,
+  securityReferralLoading,
+  securityReferralError,
+  securityReferralStatus,
+  refreshSecurityReferralData,
+  copySecurityInviteLink,
+  inviteNotice
 }) {
   return (
     <div className="home-page">
@@ -58,6 +66,7 @@ export default function HomePage({
       </header>
 
       {error ? <section className="status error">{error}</section> : null}
+      {inviteNotice ? <section className="status">{inviteNotice}</section> : null}
 
       <section className="panel">
         <h3>Активный просчет</h3>
@@ -181,6 +190,7 @@ export default function HomePage({
             ) : null}
           </>
         ) : null}
+
       </section>
 
       <div className="home-tools-row">
@@ -197,6 +207,13 @@ export default function HomePage({
         setFeedbackSoundEnabled={setFeedbackSoundEnabled}
         saveAccountSettings={saveAccountSettings}
         settingsSaving={settingsSaving}
+        isSecurityUser={isSecurityUser}
+        securityReferralData={securityReferralData}
+        securityReferralLoading={securityReferralLoading}
+        securityReferralError={securityReferralError}
+        securityReferralStatus={securityReferralStatus}
+        refreshSecurityReferralData={refreshSecurityReferralData}
+        copySecurityInviteLink={copySecurityInviteLink}
       />
     </div>
   );

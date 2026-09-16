@@ -77,7 +77,12 @@ export default function AdminPage({
   resetDeviceBindingForUser,
   toggleDeviceBinding,
   deleteUserAccount,
-  deletingUserId
+  deletingUserId,
+  updateUserSecurityRole,
+  issueUserReferralCode,
+  copyUserInviteLink,
+  referralTrialDays,
+  setReferralTrialDays
 }) {
   return (
     <div className="home-page admin-page">
@@ -224,6 +229,11 @@ export default function AdminPage({
         toggleDeviceBinding={toggleDeviceBinding}
         deleteUserAccount={deleteUserAccount}
         deletingUserId={deletingUserId}
+        updateUserSecurityRole={updateUserSecurityRole}
+        issueUserReferralCode={issueUserReferralCode}
+        copyUserInviteLink={copyUserInviteLink}
+        referralTrialDays={referralTrialDays}
+        setReferralTrialDays={setReferralTrialDays}
       />
     </div>
   );
