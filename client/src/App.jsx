@@ -18,12 +18,20 @@ import {
   deleteAdminUser,
   deleteRecount,
   finishRecountWithoutPdf,
+  getAdminCodebook,
   getAdminContactLinks,
   getAdminLogs,
   getAdminPatchNotes,
+  getAdminProductByCode,
   getAdminShopApiSettings,
   getAdminUsers,
   getMyReferralStats,
+  getSecurityCodebook,
+  getSecurityProductByCode,
+  updateAdminCodebookEntry,
+  deleteAdminCodebookEntry,
+  updateSecurityCodebookEntry,
+  deleteSecurityCodebookEntry,
   getPatchNotes,
   getRecount,
   getRecounts,
@@ -80,6 +88,7 @@ import TsdPage from './components/tsd/TsdPage.jsx';
 import HomePage from './components/home/HomePage.jsx';
 import RecountPage from './components/recount/RecountPage.jsx';
 import KeypadSandboxPage from './KeypadSandboxPage.jsx';
+import CodebookPage from './components/codebook/CodebookPage.jsx';
 
 const TOKEN_KEY = 'lokalka_auth_token';
 const PENDING_INVITE_KEY = 'lokalka_pending_invite';
@@ -221,10 +230,14 @@ export default function App() {
   const [adminUserSearch, setAdminUserSearch] = useState('');
   const [adminUserFilter, setAdminUserFilter] = useState('all');
   const [adminLogLevel, setAdminLogLevel] = useState('all');
+  const [adminLogGroup, setAdminLogGroup] = useState('all');
+  const [adminLogSelectedUsers, setAdminLogSelectedUsers] = useState([]);
+  const [adminLogUsers, setAdminLogUsers] = useState([]);
   const [adminLogSearch, setAdminLogSearch] = useState('');
   const [adminLogVisibleLimit, setAdminLogVisibleLimit] = useState(50);
   const [adminLogEntries, setAdminLogEntries] = useState([]);
   const [adminLogCounts, setAdminLogCounts] = useState({});
+  const [adminLogGroupCounts, setAdminLogGroupCounts] = useState({});
   const [adminLogLoading, setAdminLogLoading] = useState(false);
   const [adminContactLinks, setAdminContactLinks] = useState({ telegramUrl: '', maxUrl: '' });
   const [adminContactLinksSaving, setAdminContactLinksSaving] = useState(false);
@@ -247,6 +260,21 @@ export default function App() {
   const [adminSuccess, setAdminSuccess] = useState('');
   const [copiedLogId, setCopiedLogId] = useState('');
   const [referralTrialDays, setReferralTrialDays] = useState(1);
+  const [codebookData, setCodebookData] = useState({ entries: [], total: 0, page: 1, limit: 12, totalPages: 1, stats: {} });
+  const [codebookFilter, setCodebookFilter] = useState('all');
+  const [codebookPage, setCodebookPage] = useState(1);
+  const [codebookLoading, setCodebookLoading] = useState(false);
+  const [codebookLoadingMore, setCodebookLoadingMore] = useState(false);
+  const [codebookSearch, setCodebookSearch] = useState('');
+  const [codebookProducts, setCodebookProducts] = useState({});
+  const [productCard, setProductCard] = useState(null);
+  const [productCardLoading, setProductCardLoading] = useState(false);
+  const [productCardError, setProductCardError] = useState('');
+  const [productCardSaving, setProductCardSaving] = useState(false);
+  const [productCardDeleting, setProductCardDeleting] = useState(false);
+  const codebookProductsRef = useRef(new Set());
+  const codebookFeedRef = useRef(null);
+  const codebookLoadMoreRef = useRef(null);
 
   const [activeRecount, setActiveRecount] = useState(null);
   const [values, setValues] = useState({});
@@ -295,6 +323,9 @@ export default function App() {
   ));
   const [keypadLabOpen, setKeypadLabOpen] = useState(() => (
     import.meta.env.DEV && typeof window !== 'undefined' && window.location.pathname === '/keypad-lab'
+  ));
+  const [codebookOpen, setCodebookOpen] = useState(() => (
+    typeof window !== 'undefined' && window.location.pathname === '/codebook'
   ));
   const [tsdPriceModalOpen, setTsdPriceModalOpen] = useState(false);
   const [tsdPriceInput, setTsdPriceInput] = useState('');
@@ -503,7 +534,7 @@ export default function App() {
     }
 
     let cancelled = false;
-    QRCode.toDataURL(tsdResult.raw, { margin: 1, width: 320 })
+    QRCode.toDataURL(tsdResult.raw, { margin: 1, width: 280 })
       .then(dataUrl => {
         if (!cancelled) setTsdQrDataUrl(dataUrl);
       })
@@ -523,8 +554,8 @@ export default function App() {
     }
 
     try {
-      const canvas = document.createElement('canvas');
-      bwipjs.toCanvas(canvas, {
+      const barcodeCanvas = document.createElement('canvas');
+      bwipjs.toCanvas(barcodeCanvas, {
         bcid: 'code128',
         text: tsdResult.barcode,
         scale: 3,
@@ -532,6 +563,15 @@ export default function App() {
         includetext: true,
         textxalign: 'center'
       });
+
+      const frame = 16;
+      const canvas = document.createElement('canvas');
+      canvas.width = barcodeCanvas.width + frame * 2;
+      canvas.height = barcodeCanvas.height + frame * 2;
+      const context = canvas.getContext('2d');
+      context.fillStyle = '#ffffff';
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      context.drawImage(barcodeCanvas, frame, frame);
       setTsdBarcodeDataUrl(canvas.toDataURL('image/png'));
     } catch {
       setTsdBarcodeDataUrl('');
@@ -959,14 +999,18 @@ export default function App() {
     }
   }
 
-  async function refreshAdminLogs(level = adminLogLevel) {
+  async function refreshAdminLogs(level = adminLogLevel, group = adminLogGroup, users = adminLogSelectedUsers) {
     setAdminLogLoading(true);
     setError('');
     try {
-      const data = await getAdminLogs(level, 250);
+      const data = await getAdminLogs(level, 250, { group, users });
       setAdminLogLevel(data?.selectedLevel || level);
+      setAdminLogGroup(data?.selectedGroup || group);
+      setAdminLogSelectedUsers(Array.isArray(data?.selectedActorKeys) ? data.selectedActorKeys : users);
+      setAdminLogUsers(Array.isArray(data?.users) ? data.users : []);
       setAdminLogEntries(Array.isArray(data?.entries) ? data.entries : []);
       setAdminLogCounts(data?.levelCounts && typeof data.levelCounts === 'object' ? data.levelCounts : {});
+      setAdminLogGroupCounts(data?.groupCounts && typeof data.groupCounts === 'object' ? data.groupCounts : {});
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Не удалось загрузить логи');
     } finally {
@@ -1002,6 +1046,149 @@ export default function App() {
       setError(err instanceof Error ? err.message : 'Не удалось загрузить патчноуты для админки');
     } finally {
       setAdminPatchNotesLoading(false);
+    }
+  }
+
+  async function refreshCodebook(nextFilter = codebookFilter, nextPage = 1, append = false) {
+    if (!user) return;
+    if (append) setCodebookLoadingMore(true);
+    else setCodebookLoading(true);
+    setError('');
+    try {
+      const service = user.isAdmin ? getAdminCodebook : getSecurityCodebook;
+      const data = await service(nextFilter, nextPage, 12);
+      setCodebookData({
+        entries: append
+          ? [...(codebookData.entries || []), ...(Array.isArray(data?.entries) ? data.entries : [])]
+          : (Array.isArray(data?.entries) ? data.entries : []),
+        total: Number(data?.total || 0),
+        page: Number(data?.page || nextPage || 1),
+        limit: Number(data?.limit || 12),
+        totalPages: Number(data?.totalPages || 1),
+        stats: data?.stats || {}
+      });
+      setCodebookPage(Number(data?.page || nextPage || 1));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось загрузить справочник кодов');
+    } finally {
+      if (append) setCodebookLoadingMore(false);
+      else setCodebookLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!user) return;
+    const canViewCodebook = user.isAdmin || isSecurityUserRole(user);
+    if (!canViewCodebook) return;
+    if (!codebookOpen) return;
+    setCodebookProducts({});
+    codebookProductsRef.current = new Set();
+    void refreshCodebook(codebookFilter, 1);
+  }, [user, codebookOpen, codebookFilter]);
+
+  useEffect(() => {
+    const entries = codebookData.entries || [];
+    const pendingEntries = entries.filter(entry => (
+      !codebookProductsRef.current.has(String(entry.code))
+    ));
+    if (!pendingEntries.length || !user) return;
+
+    pendingEntries.forEach(entry => codebookProductsRef.current.add(String(entry.code)));
+    const service = user.isAdmin ? getAdminProductByCode : getSecurityProductByCode;
+    let cancelled = false;
+    Promise.all(pendingEntries.map(async entry => {
+      try {
+        const data = await service(entry.code);
+        return [String(entry.code), data?.product || null];
+      } catch {
+        return [String(entry.code), null];
+      }
+    })).then(results => {
+      if (cancelled) return;
+      setCodebookProducts(current => ({
+        ...current,
+        ...Object.fromEntries(results)
+      }));
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [codebookData.entries, user]);
+
+  async function loadMoreCodebook() {
+    if (codebookLoading || codebookLoadingMore || codebookPage >= (codebookData.totalPages || 1)) return;
+    await refreshCodebook(codebookFilter, codebookPage + 1, true);
+  }
+
+  useEffect(() => {
+    const target = codebookLoadMoreRef.current;
+    const root = codebookFeedRef.current;
+    if (!target || !root) return undefined;
+    const observer = new IntersectionObserver(entries => {
+      if (entries[0]?.isIntersecting) void loadMoreCodebook();
+    }, { root, rootMargin: '500px 0px' });
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [codebookPage, codebookData.totalPages, codebookLoading, codebookLoadingMore, codebookFilter]);
+
+  async function openProductCard(articleCode) {
+    if (!articleCode) return;
+    setProductCardError('');
+    setProductCardLoading(true);
+    try {
+      const isAdminMode = Boolean(user?.isAdmin);
+      const data = isAdminMode
+        ? await getAdminProductByCode(articleCode)
+        : await getSecurityProductByCode(articleCode);
+      const entry = (codebookData.entries || []).find(item => String(item.code) === String(articleCode));
+      setProductCard({
+        articleCode: String(articleCode),
+        product: data?.product || codebookProducts[String(articleCode)] || null,
+        barcodes: Array.isArray(entry?.barcodes) ? entry.barcodes : [],
+        originalBarcodes: Array.isArray(entry?.barcodes) ? entry.barcodes : [],
+        editing: false
+      });
+    } catch (err) {
+      setProductCardError(err instanceof Error ? err.message : 'Не удалось загрузить карточку товара');
+      setProductCard({ articleCode: String(articleCode), barcodes: [], product: null, editing: false });
+    } finally {
+      setProductCardLoading(false);
+    }
+  }
+
+  async function saveProductCard() {
+    if (!productCard?.articleCode || productCardSaving) return;
+    setProductCardSaving(true);
+    setError('');
+    try {
+      const update = user?.isAdmin ? updateAdminCodebookEntry : updateSecurityCodebookEntry;
+      await update(productCard.articleCode, productCard.barcodes);
+      setProductCard(current => current ? { ...current, originalBarcodes: [...current.barcodes], editing: false } : current);
+      await refreshCodebook(codebookFilter, codebookPage);
+      setAdminSuccess(user?.isAdmin ? 'Связь кода товара сохранена' : 'Связь товара сохранена');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось сохранить связь кода товара');
+    } finally {
+      setProductCardSaving(false);
+    }
+  }
+
+  async function deleteProductCard(articleCode) {
+    if (!articleCode || productCardDeleting) return;
+    if (typeof window !== 'undefined' && !window.confirm(`Удалить связь для кода ${articleCode}?`)) return;
+    setProductCardDeleting(true);
+    setError('');
+    try {
+      const remove = user?.isAdmin ? deleteAdminCodebookEntry : deleteSecurityCodebookEntry;
+      await remove(articleCode);
+      setProductCard(null);
+      await refreshCodebook(codebookFilter, codebookPage);
+      setAdminSuccess(user?.isAdmin ? 'Связь кода товара удалена' : 'Связь товара удалена');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Не удалось удалить связь кода товара');
+    } finally {
+      setProductCardDeleting(false);
     }
   }
 
@@ -1065,7 +1252,9 @@ export default function App() {
     setAdminUsers([]);
     setAdminLogLevel('all');
     setAdminLogEntries([]);
+    setAdminLogUsers([]);
     setAdminLogCounts({});
+    setAdminLogGroupCounts({});
     setPatchNotes([]);
     setPatchNotesError('');
     setExpandedPatchNotes({});
@@ -1351,6 +1540,21 @@ export default function App() {
     setTsdOpen(false);
     setTsdResult(null);
     setTsdPriceModalOpen(false);
+  }
+
+  function openCodebook() {
+    scanner.stopScanner();
+    window.history.pushState({}, '', '/codebook');
+    setCodebookOpen(true);
+    setAdminTab('users');
+    setHomeTab('recounts');
+    setProductCard(null);
+  }
+
+  function closeCodebook() {
+    window.history.replaceState({}, '', '/');
+    setCodebookOpen(false);
+    setProductCard(null);
   }
 
   function closeKeypadLab() {
@@ -1729,6 +1933,32 @@ export default function App() {
     return <KeypadSandboxPage onClose={closeKeypadLab} />;
   }
 
+  const codebookPageProps = {
+    user,
+    error,
+    codebookData,
+    codebookFilter,
+    setCodebookFilter,
+    codebookPage,
+    codebookLoading,
+    codebookLoadingMore,
+    codebookProducts,
+    codebookFeedRef,
+    codebookLoadMoreRef,
+    codebookSearch,
+    setCodebookSearch,
+    openProductCard,
+    productCard,
+    setProductCard,
+    productCardLoading,
+    productCardError,
+    productCardSaving,
+    productCardDeleting,
+    saveProductCard,
+    deleteProductCard,
+    closeCodebook
+  };
+
   if (!token && !tsdOpen) {
     return (
       <AuthPage
@@ -1749,6 +1979,7 @@ export default function App() {
   }
 
   if (user?.isAdmin) {
+    if (codebookOpen) return <CodebookPage {...codebookPageProps} />;
     return (
       <AdminPage
         user={user}
@@ -1787,6 +2018,10 @@ export default function App() {
         setAdminLogVisibleLimit={setAdminLogVisibleLimit}
         adminLogVisibleLimit={adminLogVisibleLimit}
         adminLogCounts={adminLogCounts}
+        adminLogGroupCounts={adminLogGroupCounts}
+        adminLogGroup={adminLogGroup}
+        adminLogUsers={adminLogUsers}
+        adminLogSelectedUsers={adminLogSelectedUsers}
         filteredAdminLogs={filteredAdminLogs}
         copiedLogId={copiedLogId}
         copyLogToClipboard={copyLogToClipboard}
@@ -1824,6 +2059,30 @@ export default function App() {
         copyUserInviteLink={copyUserInviteLink}
         referralTrialDays={referralTrialDays}
         setReferralTrialDays={setReferralTrialDays}
+        codebookData={codebookData}
+        codebookFilter={codebookFilter}
+        setCodebookFilter={setCodebookFilter}
+        codebookPage={codebookPage}
+        setCodebookPage={setCodebookPage}
+        codebookLoading={codebookLoading}
+        codebookLoadingMore={codebookLoadingMore}
+        codebookProducts={codebookProducts}
+        codebookFeedRef={codebookFeedRef}
+        codebookLoadMoreRef={codebookLoadMoreRef}
+        refreshCodebook={refreshCodebook}
+        openProductCard={openProductCard}
+        productCard={productCard}
+        setProductCard={setProductCard}
+        codebookSearch={codebookSearch}
+        setCodebookSearch={setCodebookSearch}
+        productCardLoading={productCardLoading}
+        productCardError={productCardError}
+        productCardSaving={productCardSaving}
+        productCardDeleting={productCardDeleting}
+        saveProductCard={saveProductCard}
+        deleteProductCard={deleteProductCard}
+        codebookConflictOnly={codebookFilter === 'conflict'}
+        openCodebook={openCodebook}
       />
     );
   }
@@ -1842,6 +2101,10 @@ export default function App() {
         clearPendingInvite={clearPendingInvite}
       />
     );
+  }
+
+  if (codebookOpen && user && isSecurityUserRole(user)) {
+    return <CodebookPage {...codebookPageProps} />;
   }
 
   if (tsdOpen) {
@@ -1913,6 +2176,29 @@ export default function App() {
         refreshSecurityReferralData={refreshSecurityReferralData}
         copySecurityInviteLink={copySecurityInviteLink}
         inviteNotice={homeInviteNotice}
+        codebookData={codebookData}
+        codebookFilter={codebookFilter}
+        setCodebookFilter={setCodebookFilter}
+        codebookPage={codebookPage}
+        setCodebookPage={setCodebookPage}
+        codebookLoading={codebookLoading}
+        codebookLoadingMore={codebookLoadingMore}
+        codebookProducts={codebookProducts}
+        codebookFeedRef={codebookFeedRef}
+        codebookLoadMoreRef={codebookLoadMoreRef}
+        refreshCodebook={refreshCodebook}
+        openProductCard={openProductCard}
+        productCard={productCard}
+        setProductCard={setProductCard}
+        codebookSearch={codebookSearch}
+        setCodebookSearch={setCodebookSearch}
+        productCardLoading={productCardLoading}
+        productCardError={productCardError}
+        productCardSaving={productCardSaving}
+        productCardDeleting={productCardDeleting}
+        saveProductCard={saveProductCard}
+        deleteProductCard={deleteProductCard}
+        openCodebook={openCodebook}
       />
     );
   }

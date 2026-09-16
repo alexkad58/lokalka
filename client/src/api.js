@@ -91,10 +91,12 @@ export async function getAdminUsers() {
   return readJsonOrThrow(response, 'Не удалось загрузить пользователей');
 }
 
-export async function getAdminLogs(level = 'all', limit = 200) {
+export async function getAdminLogs(level = 'all', limit = 200, options = {}) {
   const params = new URLSearchParams();
   params.set('level', String(level || 'all'));
   params.set('limit', String(limit));
+  if (options.group && options.group !== 'all') params.set('group', String(options.group));
+  if (Array.isArray(options.users) && options.users.length > 0) params.set('users', options.users.join(','));
 
   const response = await fetch(`/api/admin/logs?${params.toString()}`, {
     headers: authHeaders()
@@ -172,6 +174,76 @@ export async function updateAdminShopApiToken(token) {
     body: JSON.stringify({ token })
   });
   return readJsonOrThrow(response, 'Не удалось сохранить токен API магазина');
+}
+
+export async function getAdminProductByCode(code, storeNumber = '') {
+  const params = new URLSearchParams();
+  if (storeNumber) params.set('storeNumber', String(storeNumber));
+  const suffix = params.toString() ? `?${params.toString()}` : '';
+  const response = await fetch(`/api/admin/products/${encodeURIComponent(code)}${suffix}`, {
+    headers: authHeaders()
+  });
+  return readJsonOrThrow(response, 'Не удалось загрузить товар по артикулу');
+}
+
+export async function getSecurityProductByCode(code, storeNumber = '') {
+  const params = new URLSearchParams();
+  if (storeNumber) params.set('storeNumber', String(storeNumber));
+  const suffix = params.toString() ? `?${params.toString()}` : '';
+  const response = await fetch(`/api/referrals/products/${encodeURIComponent(code)}${suffix}`, {
+    headers: authHeaders()
+  });
+  return readJsonOrThrow(response, 'Не удалось загрузить товар по артикулу');
+}
+
+export async function getAdminCodebook(filter = 'all', page = 1, limit = 12) {
+  const params = new URLSearchParams({ filter: String(filter || 'all'), page: String(page), limit: String(limit) });
+  const response = await fetch(`/api/admin/barcode-cache?${params.toString()}`, {
+    headers: authHeaders()
+  });
+  return readJsonOrThrow(response, 'Не удалось загрузить справочник кодов');
+}
+
+export async function getSecurityCodebook(filter = 'all', page = 1, limit = 12) {
+  const params = new URLSearchParams({ filter: String(filter || 'all'), page: String(page), limit: String(limit) });
+  const response = await fetch(`/api/referrals/barcode-cache?${params.toString()}`, {
+    headers: authHeaders()
+  });
+  return readJsonOrThrow(response, 'Не удалось загрузить справочник кодов');
+}
+
+export async function updateAdminCodebookEntry(code, barcodes) {
+  const response = await fetch(`/api/admin/barcode-cache/${encodeURIComponent(code)}`, {
+    method: 'PATCH',
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ barcodes })
+  });
+  return readJsonOrThrow(response, 'Не удалось сохранить связь кода товара');
+}
+
+export async function deleteAdminCodebookEntry(code) {
+  const response = await fetch(`/api/admin/barcode-cache/${encodeURIComponent(code)}`, {
+    method: 'DELETE',
+    headers: authHeaders()
+  });
+  return readJsonOrThrow(response, 'Не удалось удалить связь кода товара');
+}
+
+export async function updateSecurityCodebookEntry(code, barcodes) {
+  const response = await fetch(`/api/referrals/barcode-cache/${encodeURIComponent(code)}`, {
+    method: 'PATCH',
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ barcodes })
+  });
+  return readJsonOrThrow(response, 'Не удалось сохранить связь кода товара');
+}
+
+export async function deleteSecurityCodebookEntry(code) {
+  const response = await fetch(`/api/referrals/barcode-cache/${encodeURIComponent(code)}`, {
+    method: 'DELETE',
+    headers: authHeaders()
+  });
+  return readJsonOrThrow(response, 'Не удалось удалить связь кода товара');
 }
 
 export async function activateUserSubscription(userId, payload = {}) {

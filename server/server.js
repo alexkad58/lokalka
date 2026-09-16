@@ -496,7 +496,8 @@ app.register(createReferralRoutes({
   referralService,
   getRequestIp,
   buildRequestLogMeta,
-  logEvent
+  logEvent,
+  shopApiService
 }));
 app.register(createBarcodeRoutes({
   authenticate,

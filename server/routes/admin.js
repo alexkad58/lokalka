@@ -111,6 +111,54 @@ export function createAdminRoutes({
       tokenUpdatedAt: tokenState.updatedAt
     }));
 
+    app.get('/api/admin/barcode-cache', { preHandler: [authenticate, requireAdmin] }, async request => {
+      const query = request.query && typeof request.query === 'object' ? request.query : {};
+      const filter = String(query.filter || 'all').trim();
+      const page = Number.parseInt(String(query.page || '1'), 10);
+      const limit = Number.parseInt(String(query.limit || '12'), 10);
+      return { ok: true, ...(shopApiService.buildCodebookEntries({ filter, page, limit })) };
+    });
+
+    app.patch('/api/admin/barcode-cache/:code', { preHandler: [authenticate, requireAdmin] }, async (request, reply) => {
+      const code = String(request.params?.code || '').trim();
+      const body = request.body && typeof request.body === 'object' ? request.body : {};
+      if (!code || !Array.isArray(body.barcodes)) {
+        return reply.code(400).send({ ok: false, error: 'Код и массив штрихкодов обязательны' });
+      }
+      return { ok: true, ...shopApiService.updateCodebookEntry(code, body.barcodes) };
+    });
+
+    app.delete('/api/admin/barcode-cache/:code', { preHandler: [authenticate, requireAdmin] }, async (request, reply) => {
+      const code = String(request.params?.code || '').trim();
+      if (!code) return reply.code(400).send({ ok: false, error: 'Не указан код товара' });
+      return { ok: true, ...shopApiService.deleteCodebookEntry(code) };
+    });
+
+    app.get('/api/admin/products/:code', { preHandler: [authenticate, requireAdmin] }, async (request, reply) => {
+      const code = String(request.params?.code || '').trim();
+      const storeNumber = String(request.query?.storeNumber || request.query?.shop_id || '').trim();
+      if (!code) {
+        return reply.code(400).send({ ok: false, error: 'Не указан код товара' });
+      }
+
+      const result = await shopApiService.fetchProductByArticle(code, storeNumber);
+      if (!result.ok) {
+        return reply.code(Number(result.status) || 502).send({
+          ok: false,
+          error: result.error?.message || 'Не удалось получить товар по артикулу',
+          details: result.error || null
+        });
+      }
+
+      return {
+        ok: true,
+        product: result.product,
+        payload: result.payload,
+        articleCode: result.articleCode,
+        source: result.source
+      };
+    });
+
     app.get('/api/admin/contact-links', { preHandler: [authenticate, requireAdmin] }, async () => ({
       ok: true,
       links: getSupportLinks()
@@ -160,7 +208,7 @@ export function createAdminRoutes({
 
     app.get('/api/admin/logs', { preHandler: [authenticate, requireAdmin] }, async request => {
       const query = request.query && typeof request.query === 'object' ? request.query : {};
-      return { ok: true, ...getLogs(query.level, query.limit) };
+      return { ok: true, ...getLogs(query.level, query.limit, query.group, query.users) };
     });
 
     app.post('/api/admin/users/:id/subscription', { preHandler: [authenticate, requireAdmin] }, async (request, reply) => {

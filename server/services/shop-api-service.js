@@ -108,20 +108,76 @@ function getHeaderToken(response, headerName) {
     : value.trim();
 }
 
-function buildShopBarcodeUrl(shopApi, barcode, storeNumber = '') {
+function buildShopCodeUrl(shopApi, code, storeNumber = '') {
   if (!shopApi.url) return '';
-  const encodedBarcode = encodeURIComponent(barcode);
-  let url = shopApi.url.replace('{barcode}', encodedBarcode);
-  if (!shopApi.url.includes('{barcode}') && !url.includes('?')) {
+  const normalizedCode = String(code || '').trim();
+  const encodedCode = encodeURIComponent(normalizedCode);
+  let url = shopApi.url
+    .replace(/\{barcode\}/gi, encodedCode)
+    .replace(/\{code\}/gi, encodedCode)
+    .replace(/\{product\}/gi, encodedCode);
+
+  if (!shopApi.url.includes('{barcode}') && !shopApi.url.includes('{code}') && !shopApi.url.includes('{product}') && !url.includes('?')) {
     if (!url.endsWith('/')) url += '/';
-    url += `${encodedBarcode}/`;
+    url += `${encodedCode}/`;
   }
+
   const query = [];
   if (shopApi.cityId) query.push(`city_id=${encodeURIComponent(shopApi.cityId)}`);
   const shopId = String(storeNumber || shopApi.shopId || '').trim();
   if (shopId) query.push(`shop_id=${encodeURIComponent(shopId)}`);
   if (query.length) url += `${url.includes('?') ? '&' : '?'}${query.join('&')}`;
   return url;
+}
+
+function buildShopBarcodeUrl(shopApi, barcode, storeNumber = '') {
+  return buildShopCodeUrl(shopApi, barcode, storeNumber);
+}
+
+function normalizeProductPayload(payload) {
+  const responseError = payload?.error && typeof payload.error === 'object' ? payload.error : null;
+  const hasSuccessFlag = payload && typeof payload === 'object' && payload.success === false;
+  if (hasSuccessFlag || responseError) {
+    return {
+      ok: false,
+      error: {
+        code: responseError?.code ?? payload?.code ?? null,
+        message: responseError?.message || payload?.message || 'Не удалось получить товар по артикулу'
+      },
+      payload
+    };
+  }
+
+  const result = payload?.result && typeof payload.result === 'object'
+    ? payload.result
+    : (payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : null);
+
+  if (!result) {
+    return { ok: false, error: { code: null, message: 'Пустой ответ API магазина' }, payload };
+  }
+
+  const productId = result.product_id ?? result.productId ?? result.article ?? result.code ?? result.id ?? null;
+  const normalized = {
+    productId: productId === null || productId === undefined ? null : String(productId).trim(),
+    name: String(result.name || '').trim(),
+    description: String(result.description || '').trim(),
+    measure: String(result.measure || '').trim(),
+    img: String(result.img || '').trim(),
+    labelImg: String(result.label_img || result.labelImg || '').trim(),
+    backLabelImg: String(result.back_label_img || result.backLabelImg || '').trim(),
+    quantity: Number.isFinite(Number(result.quantity)) ? Number(result.quantity) : null,
+    countryFlag: String(result.country_flag || result.countryFlag || '').trim(),
+    type: String(result.type || '').trim(),
+    imgPreview: String(result.img_preview || result.imgPreview || '').trim(),
+    labelImgPreview: String(result.label_img_preview || result.labelImgPreview || '').trim(),
+    backLabelImgPreview: String(result.back_label_img_preview || result.backLabelImgPreview || '').trim()
+  };
+
+  if (!normalized.productId && !normalized.name && !normalized.img && !normalized.imgPreview) {
+    return { ok: false, error: { code: null, message: 'Не удалось распознать товар в ответе API' }, payload };
+  }
+
+  return { ok: true, product: normalized, payload };
 }
 
 async function sendShopApiRequest(url, options = {}) {
@@ -247,6 +303,146 @@ export function createShopApiService({
     }
   }
 
+  async function fetchProductByArticle(articleCode, storeNumber = '') {
+    const normalizedCode = String(articleCode || '').trim();
+    if (!normalizedCode) {
+      return { ok: false, status: 400, error: { code: 400, message: 'Не указан код товара' } };
+    }
+    if (!shopApi.url) {
+      return { ok: false, status: 503, error: { code: 503, message: 'API магазина не настроено' } };
+    }
+
+    const url = buildShopCodeUrl(shopApi, normalizedCode, storeNumber);
+    const headers = { Accept: 'application/json' };
+    if (shopApi.userAgent) headers['User-Agent'] = shopApi.userAgent;
+    if (tokenState.accessToken) headers[shopApi.tokenHeader] = buildTokenHeaderValue(tokenState.accessToken, shopApi.tokenPrefix);
+    if (shopApi.refreshHeader && tokenState.refreshToken) headers[shopApi.refreshHeader] = tokenState.refreshToken;
+    const startedAt = Date.now();
+    const meta = {
+      method: shopApi.method,
+      url,
+      articleCode: normalizedCode,
+      hasAccessToken: Boolean(tokenState.accessToken),
+      accessTokenLast5: lastTokenChars(tokenState.accessToken),
+      hasRefreshToken: Boolean(tokenState.refreshToken)
+    };
+    logEvent('info', 'shop-api-product-request', meta);
+    logShopStdout('product-request', meta);
+
+    try {
+      const response = await sendShopApiRequest(url, { method: shopApi.method, headers });
+      const payload = await parseJson(response);
+      const tokens = extractResponseTokens(response, payload, shopApi);
+      updateTokenState({ accessToken: tokens.accessToken, refreshToken: tokens.refreshToken });
+
+      const responseMeta = { method: shopApi.method, url, status: response.status, durationMs: Date.now() - startedAt };
+      logEvent('info', 'shop-api-product-response', responseMeta);
+      logShopStdout('product-response', responseMeta);
+
+      const normalized = normalizeProductPayload(payload);
+      if (normalized.ok) {
+        return {
+          ok: true,
+          status: response.status,
+          source: 'shop-api-product',
+          articleCode: normalizedCode,
+          product: normalized.product,
+          payload: normalized.payload
+        };
+      }
+
+      return {
+        ok: false,
+        status: response.status || 502,
+        source: 'shop-api-product',
+        articleCode: normalizedCode,
+        error: normalized.error,
+        payload: normalized.payload
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logEvent('error', 'shop-api-product-error', { articleCode: normalizedCode, method: shopApi.method, url, message });
+      logShopStdout('product-error', { articleCode: normalizedCode, method: shopApi.method, url });
+      return { ok: false, status: 502, source: 'shop-api-unreachable', articleCode: normalizedCode, error: { code: 502, message } };
+    }
+  }
+
+  function buildCodebookEntries({ filter = 'all', page = 1, limit = 20 } = {}) {
+    const codeToBarcodes = new Map();
+    const barcodeToCodes = new Map();
+
+    for (const [barcode, record] of cache.entries()) {
+      const normalizedBarcode = String(barcode || '').trim();
+      if (!normalizedBarcode) continue;
+
+      const codes = Array.isArray(record?.codes)
+        ? record.codes.map(code => String(code || '').trim()).filter(Boolean)
+        : (record?.code ? [String(record.code).trim()] : []);
+
+      if (!codes.length) continue;
+
+      const uniqueCodes = Array.from(new Set(codes));
+      barcodeToCodes.set(normalizedBarcode, uniqueCodes);
+
+      for (const code of uniqueCodes) {
+        const set = codeToBarcodes.get(code) || new Set();
+        set.add(normalizedBarcode);
+        codeToBarcodes.set(code, set);
+      }
+    }
+
+    const entries = Array.from(codeToBarcodes.entries()).map(([code, barcodes]) => {
+      const normalizedBarcodes = Array.from(barcodes).sort();
+      const directConflict = normalizedBarcodes.some(barcode => (barcodeToCodes.get(barcode) || []).length > 1);
+      const conflict = normalizedBarcodes.length > 1 || directConflict;
+      const relatedRecords = normalizedBarcodes
+        .map(barcode => cache.get(barcode))
+        .filter(Boolean)
+        .map(record => ({
+          barcode: String(record?.barcode || '').trim(),
+          source: String(record?.source || '').trim(),
+          storeNumber: String(record?.storeNumber || '').trim(),
+          updatedAt: Number(record?.updatedAt || 0)
+        }));
+
+      const latestUpdatedAt = relatedRecords.reduce((max, item) => Math.max(max, Number(item.updatedAt || 0)), 0);
+      const storeNumbers = Array.from(new Set(relatedRecords.map(item => item.storeNumber).filter(Boolean))).sort();
+      const sources = Array.from(new Set(relatedRecords.map(item => item.source).filter(Boolean))).sort();
+
+      return {
+        code,
+        barcodes: normalizedBarcodes,
+        barcodeCount: normalizedBarcodes.length,
+        storeNumbers,
+        sources,
+        updatedAt: latestUpdatedAt,
+        conflict
+      };
+    }).sort((a, b) => {
+      if (a.conflict !== b.conflict) return Number(b.conflict) - Number(a.conflict);
+      return a.code.localeCompare(b.code, 'ru', { numeric: true });
+    });
+
+    const filtered = filter === 'conflict' ? entries.filter(entry => entry.conflict) : entries;
+    const safePage = Number.isFinite(Number(page)) && Number(page) > 0 ? Number(page) : 1;
+    const safeLimit = Number.isFinite(Number(limit)) && Number(limit) > 0 ? Number(limit) : 20;
+    const startIndex = (safePage - 1) * safeLimit;
+    const pageEntries = filtered.slice(startIndex, startIndex + safeLimit);
+
+    return {
+      entries: pageEntries,
+      total: filtered.length,
+      page: safePage,
+      limit: safeLimit,
+      totalPages: Math.max(1, Math.ceil(filtered.length / safeLimit)),
+      stats: {
+        totalCodes: entries.length,
+        conflictCodes: entries.filter(entry => entry.conflict).length,
+        totalLinks: Array.from(cache.entries()).reduce((sum, [, record]) => sum + (Array.isArray(record?.codes) ? record.codes.length : (record?.code ? 1 : 0)), 0)
+      }
+    };
+  }
+
   function addResolutionCode(barcode, code, source, product, storeNumber = '') {
     const existing = cache.get(barcode);
     const codes = new Set(existing?.codes || []);
@@ -292,6 +488,45 @@ export function createShopApiService({
     return { changed: true, barcode: normalizedBarcode, code: normalizedCode, previousBarcodes };
   }
 
+  function updateCodebookEntry(code, barcodes, source = 'manual', storeNumber = '') {
+    const normalizedCode = String(code || '').trim();
+    const normalizedBarcodes = Array.from(new Set(
+      (Array.isArray(barcodes) ? barcodes : [])
+        .map(barcode => String(barcode || '').trim())
+        .filter(Boolean)
+    ));
+
+    if (!normalizedCode) return { changed: false, code: '', barcodes: [] };
+
+    for (const [barcode, record] of cache.entries()) {
+      const codes = (record?.codes || []).map(String).filter(item => item !== normalizedCode);
+      if (codes.length) {
+        cache.set(barcode, { ...record, codes, updatedAt: Date.now() });
+      } else {
+        cache.delete(barcode);
+      }
+    }
+
+    for (const barcode of normalizedBarcodes) {
+      const current = cache.get(barcode);
+      const codes = Array.from(new Set([...(current?.codes || []).map(String), normalizedCode]));
+      cache.set(barcode, {
+        ...(current || {}),
+        codes,
+        source: source || current?.source || 'manual',
+        storeNumber: String(storeNumber || current?.storeNumber || '').trim(),
+        updatedAt: Date.now()
+      });
+    }
+
+    persistCache();
+    return { changed: true, code: normalizedCode, barcodes: normalizedBarcodes };
+  }
+
+  function deleteCodebookEntry(code) {
+    return updateCodebookEntry(code, []);
+  }
+
   function buildRecountCache(items) {
     const itemByCode = {};
     const barcodeToCodes = {};
@@ -305,11 +540,17 @@ export function createShopApiService({
 
   return {
     resolveBarcodeFromShopApi,
+    fetchProductByArticle,
+    buildCodebookEntries,
     addResolutionCode,
     findBarcodesForCode,
     reassignResolutionCode,
+    updateCodebookEntry,
+    deleteCodebookEntry,
     buildRecountCache,
     cache,
+    normalizeProductPayload,
+    buildProductLookupUrl: (articleCode, storeNumber = '') => buildShopCodeUrl(shopApi, articleCode, storeNumber),
     buildShopBarcodeUrl: (barcode, storeNumber = '') => buildShopBarcodeUrl(shopApi, barcode, storeNumber),
     lastTokenChars
   };

@@ -42,7 +42,30 @@ export default function HomePage({
   securityReferralStatus,
   refreshSecurityReferralData,
   copySecurityInviteLink,
-  inviteNotice
+  inviteNotice,
+  codebookData,
+  codebookFilter,
+  setCodebookFilter,
+  codebookPage,
+  setCodebookPage,
+  codebookLoading,
+  codebookLoadingMore,
+  codebookProducts,
+  codebookFeedRef,
+  codebookLoadMoreRef,
+  refreshCodebook,
+  openProductCard,
+  productCard,
+  setProductCard,
+  codebookSearch,
+  setCodebookSearch,
+  productCardLoading,
+  productCardError,
+  productCardSaving,
+  productCardDeleting,
+  saveProductCard,
+  deleteProductCard,
+  openCodebook
 }) {
   return (
     <div className="home-page">
@@ -114,6 +137,15 @@ export default function HomePage({
             >
               Патчноуты
             </button>
+            {isSecurityUser ? (
+              <button
+                type="button"
+                className={`home-subtab ${homeTab === 'codebook' ? 'active' : ''}`}
+                onClick={openCodebook}
+              >
+                Коды товара
+              </button>
+            ) : null}
           </div>
         </div>
 
@@ -189,6 +221,104 @@ export default function HomePage({
               </div>
             ) : null}
           </>
+        ) : null}
+
+        {homeTab === 'codebook' && isSecurityUser ? (
+          <>
+            <div className="home-history-head">
+              <div className="home-subtabs" role="tablist" aria-label="Фильтр привязок">
+                <button type="button" className={`home-subtab ${codebookFilter === 'all' ? 'active' : ''}`} onClick={() => setCodebookFilter('all')}>Все</button>
+                <button type="button" className={`home-subtab ${codebookFilter === 'conflict' ? 'active' : ''}`} onClick={() => setCodebookFilter('conflict')}>Конфликты</button>
+              </div>
+            </div>
+
+            <div className="settings-field" style={{ marginBottom: '12px' }}>
+              <label htmlFor="security-codebook-search">Поиск по коду товара</label>
+              <input id="security-codebook-search" value={codebookSearch} onChange={event => setCodebookSearch(event.target.value)} placeholder="Например: 12345" />
+            </div>
+
+            {codebookLoading ? <div className="status">Загрузка списка...</div> : null}
+
+            {!codebookLoading ? (
+              <div ref={codebookFeedRef} className="history-list codebook-feed">
+                {(codebookData.entries || []).filter(entry => !codebookSearch || String(entry.code).includes(String(codebookSearch).trim())).map(entry => (
+                  <article key={entry.code} className={`history-item ${entry.conflict ? 'conflict' : ''}`}>
+                    <div className="history-item-head">
+                      <div className="codebook-item-title">
+                        {codebookProducts?.[String(entry.code)]?.imgPreview || codebookProducts?.[String(entry.code)]?.img ? (
+                          <img src={codebookProducts[String(entry.code)].imgPreview || codebookProducts[String(entry.code)].img} alt="" className="codebook-item-image" />
+                        ) : <span className="codebook-item-image-placeholder" />}
+                        <span><strong>{codebookProducts?.[String(entry.code)]?.name || 'Загрузка товара...'}</strong><small>{entry.code}</small></span>
+                      </div>
+                      {entry.conflict ? <span className="status error" style={{ padding: '4px 8px' }}>конфликт</span> : null}
+                    </div>
+                    <div className="line mini">ШК: {entry.barcodes.join(', ') || '—'}</div>
+                    <div className="line mini">Связей: {entry.barcodeCount}</div>
+                    <button type="button" className="ghost" onClick={() => openProductCard(entry.code)}>Открыть карточку</button>
+                  </article>
+                ))}
+              </div>
+            ) : null}
+
+            {!codebookLoading && !(codebookData.entries || []).length ? (
+              <div className="status">Нет записей по текущему фильтру</div>
+            ) : null}
+
+            <div ref={codebookLoadMoreRef} className="codebook-load-more">
+              {codebookLoadingMore ? <span>Загружаем следующие товары...</span> : null}
+              {!codebookLoadingMore && codebookPage < (codebookData.totalPages || 1) ? <span>Прокрутите ниже для загрузки</span> : null}
+              {!codebookLoadingMore && codebookPage >= (codebookData.totalPages || 1) && codebookData.total ? <span>Все товары загружены</span> : null}
+            </div>
+          </>
+        ) : null}
+
+        {productCard && isSecurityUser ? (
+          <div className="modal-backdrop" onClick={() => setProductCard(null)}>
+            <div className="modal-card product-card-modal" onClick={event => event.stopPropagation()}>
+            <div className="modal-header">
+              <h3>Карточка товара: {productCard.articleCode}</h3>
+              <button type="button" className="ghost mini-close-btn" onClick={() => setProductCard(null)} aria-label="Закрыть">✕</button>
+            </div>
+            {productCardLoading ? <div className="status">Загрузка карточки...</div> : null}
+            {productCardError ? <div className="status error">{productCardError}</div> : null}
+            {!productCardLoading && productCard.product ? (
+              <div className="product-card-layout">
+                <div className="product-card-image-wrap">
+                  <img src={productCard.product.imgPreview || productCard.product.img} alt={productCard.product.name || productCard.articleCode} className="product-card-image" />
+                </div>
+                <div className="product-card-body">
+                  <h4>{productCard.product.name || 'Товар без названия'}</h4>
+                  {productCard.product.description ? <p>{productCard.product.description}</p> : null}
+                  <div className="line mini">Тип: {productCard.product.type || '—'}</div>
+                  <div className="line mini">Литраж/грамовка: {productCard.product.measure || '—'}</div>
+                  <div className="line mini">Остаток: {productCard.product.quantity ?? '—'}</div>
+                  {productCard.editing ? (
+                    <label className="settings-field">
+                      <span>Связанные ШК</span>
+                      <textarea
+                        value={productCard.barcodes.join('\n')}
+                        onChange={event => setProductCard({
+                          ...productCard,
+                          barcodes: Array.from(new Set(event.target.value.split(/[\s,;]+/).map(value => value.trim()).filter(Boolean)))
+                        })}
+                        rows={4}
+                      />
+                    </label>
+                  ) : <div className="line mini">Связанные ШК: {productCard.barcodes.join(', ') || '—'}</div>}
+                  <div className="product-card-actions">
+                    {productCard.editing ? <button type="button" className="ghost" onClick={saveProductCard} disabled={productCardSaving}>{productCardSaving ? 'Сохранение...' : 'Сохранить'}</button> : null}
+                    <button type="button" className="ghost" onClick={() => setProductCard({
+                      ...productCard,
+                      editing: !productCard.editing,
+                      barcodes: productCard.editing ? [...(productCard.originalBarcodes || [])] : productCard.barcodes
+                    })} disabled={productCardSaving || productCardDeleting}>{productCard.editing ? 'Отменить' : 'Редактировать'}</button>
+                    <button type="button" className="danger" onClick={() => deleteProductCard(productCard.articleCode)} disabled={productCardDeleting}>{productCardDeleting ? 'Удаление...' : 'Удалить'}</button>
+                  </div>
+                </div>
+              </div>
+            ) : null}
+            </div>
+          </div>
         ) : null}
 
       </section>
