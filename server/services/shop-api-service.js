@@ -134,6 +134,14 @@ function buildShopBarcodeUrl(shopApi, barcode, storeNumber = '') {
   return buildShopCodeUrl(shopApi, barcode, storeNumber);
 }
 
+function buildShopProductUrl(shopApi, articleCode, storeNumber = '') {
+  const productApi = {
+    ...shopApi,
+    url: String(shopApi.url || '').replace(/\/barcode(?=\/|$)/i, '')
+  };
+  return buildShopCodeUrl(productApi, articleCode, storeNumber);
+}
+
 function normalizeProductPayload(payload) {
   const responseError = payload?.error && typeof payload.error === 'object' ? payload.error : null;
   const hasSuccessFlag = payload && typeof payload === 'object' && payload.success === false;
@@ -312,7 +320,7 @@ export function createShopApiService({
       return { ok: false, status: 503, error: { code: 503, message: 'API магазина не настроено' } };
     }
 
-    const url = buildShopCodeUrl(shopApi, normalizedCode, storeNumber);
+    const url = buildShopProductUrl(shopApi, normalizedCode, storeNumber);
     const headers = { Accept: 'application/json' };
     if (shopApi.userAgent) headers['User-Agent'] = shopApi.userAgent;
     if (tokenState.accessToken) headers[shopApi.tokenHeader] = buildTokenHeaderValue(tokenState.accessToken, shopApi.tokenPrefix);
@@ -550,7 +558,8 @@ export function createShopApiService({
     buildRecountCache,
     cache,
     normalizeProductPayload,
-    buildProductLookupUrl: (articleCode, storeNumber = '') => buildShopCodeUrl(shopApi, articleCode, storeNumber),
+    buildProductLookupUrl: (articleCode, storeNumber = '') => buildShopProductUrl(shopApi, articleCode, storeNumber),
+    buildShopProductUrl: (articleCode, storeNumber = '') => buildShopProductUrl(shopApi, articleCode, storeNumber),
     buildShopBarcodeUrl: (barcode, storeNumber = '') => buildShopBarcodeUrl(shopApi, barcode, storeNumber),
     lastTokenChars
   };
