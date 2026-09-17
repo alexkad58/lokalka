@@ -1,7 +1,10 @@
 import "dotenv/config";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { Bot, InputFile, InlineKeyboard } from "grammy";
 import { b, fmt, u, i } from "@grammyjs/parse-mode";
-import { ProxyAgent, setGlobalDispatcher } from "undici";
+import { ProxyAgent, fetch as undiciFetch, setGlobalDispatcher } from "undici";
 
 import { createImage } from "./generator.js";
 import { readBarcode } from "./barcode.js";
@@ -12,9 +15,29 @@ if (!BOT_TOKEN) {
   throw new Error("Missing TG_TOKEN or TOKEN in environment variables");
 }
 
+const TSD_ADMIN_ID = String(process.env.TSD_ADMIN_ID || "").trim();
+const DEFAULT_DATA_FILE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "server", "storage.json");
+const DATA_FILE = path.resolve(String(process.env.LOKALKA_DATA_FILE || DEFAULT_DATA_FILE).trim());
+
 const TSD_PROXY = String(process.env.TSD_PROXY || "").trim();
+let telegramFetch = null;
 if (TSD_PROXY) {
-  setGlobalDispatcher(new ProxyAgent(TSD_PROXY));
+  const proxyAgent = new ProxyAgent(TSD_PROXY.replace(/^socks5h:\/\//i, "socks5://"));
+  setGlobalDispatcher(proxyAgent);
+  telegramFetch = (url, options = {}) => {
+    const { agent, compress, signal, ...fetchOptions } = options || {};
+    let nativeSignal = signal;
+    if (signal && !(signal instanceof AbortSignal)) {
+      const controller = new AbortController();
+      nativeSignal = controller.signal;
+      if (signal.aborted) {
+        controller.abort(signal.reason);
+      } else {
+        signal.addEventListener("abort", () => controller.abort(signal.reason), { once: true });
+      }
+    }
+    return undiciFetch(url, { ...fetchOptions, signal: nativeSignal, dispatcher: proxyAgent });
+  };
   console.log(`Proxy enabled via TSD_PROXY`);
 }
 
@@ -122,7 +145,111 @@ const buildPayload = async (result, caption) => {
   return null;
 };
 
-const bot = new Bot(BOT_TOKEN);
+const bot = new Bot(BOT_TOKEN, telegramFetch ? { client: { fetch: telegramFetch } } : undefined);
+
+const isAdminUser = (ctx) => Boolean(TSD_ADMIN_ID && String(ctx.from?.id || "") === TSD_ADMIN_ID);
+
+const formatStatDate = (value) => {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleString("ru-RU", { timeZone: "Europe/Moscow" });
+};
+
+const isDateInRange = (value, startIso, endIso) => {
+  const ts = Date.parse(String(value || ""));
+  const startTs = Date.parse(String(startIso || ""));
+  const endTs = Date.parse(String(endIso || ""));
+  if (Number.isNaN(ts) || Number.isNaN(startTs) || Number.isNaN(endTs)) return false;
+  return ts >= startTs && ts <= endTs;
+};
+
+const loadStorage = async () => JSON.parse(await readFile(DATA_FILE, "utf8"));
+
+const buildReferralStatsText = async () => {
+  const storage = await loadStorage();
+  const users = Array.isArray(storage.users) ? storage.users : [];
+  const recounts = Array.isArray(storage.recounts) ? storage.recounts : [];
+  const codes = Array.isArray(storage.referrals?.codes) ? storage.referrals.codes : [];
+  const activations = Array.isArray(storage.referrals?.activations) ? storage.referrals.activations : [];
+  const usersById = new Map(users.map((user) => [String(user.id), user]));
+  const activationGroups = new Map();
+
+  for (const activation of activations) {
+    const ownerUserId = String(activation.ownerUserId || "");
+    if (!activationGroups.has(ownerUserId)) activationGroups.set(ownerUserId, []);
+    activationGroups.get(ownerUserId).push(activation);
+  }
+
+  const owners = codes
+    .map((code) => {
+      const owner = usersById.get(String(code.ownerUserId)) || null;
+      const ownerActivations = activationGroups.get(String(code.ownerUserId)) || [];
+      const completedRecounts = ownerActivations.reduce((total, activation) => {
+        return total + recounts.filter((recount) => (
+          String(recount.userId) === String(activation.activatedUserId)
+          && recount.status === "completed"
+          && isDateInRange(recount.completedAt, activation.activatedAt, activation.trialUntil)
+        )).length;
+      }, 0);
+      const lastActivation = ownerActivations
+        .slice()
+        .sort((left, right) => String(right.activatedAt || "").localeCompare(String(left.activatedAt || "")))[0] || null;
+
+      return {
+        code,
+        owner,
+        activations: ownerActivations,
+        completedRecounts,
+        lastActivation
+      };
+    })
+    .sort((left, right) => right.activations.length - left.activations.length || String(left.owner?.login || "").localeCompare(String(right.owner?.login || "")));
+
+  const referredUserIds = new Set(activations.map((activation) => String(activation.activatedUserId || "")).filter(Boolean));
+  const lines = [
+    "Статистика реферальных ссылок",
+    `Пользователей всего: ${users.length}`,
+    `С реферальной активацией: ${referredUserIds.size}`,
+    `Активаций всего: ${activations.length}`,
+    `Владельцев кодов: ${codes.length}`,
+    ""
+  ];
+
+  if (!owners.length) {
+    lines.push("Реферальных кодов пока нет.");
+    return lines.join("\n");
+  }
+
+  owners.forEach((item, index) => {
+    const ownerLogin = item.owner?.login || item.code.ownerUserId || "-";
+    const status = item.code.revokedAt ? "отозван" : "активен";
+    const lastUser = usersById.get(String(item.lastActivation?.activatedUserId || ""));
+    lines.push(
+      `${index + 1}. ${ownerLogin} — ${item.code.code} (${status})`,
+      `   Зарегистрировалось: ${item.activations.length}`,
+      `   Завершенных просчетов на пробном доступе: ${item.completedRecounts}`,
+      `   Последняя активация: ${item.lastActivation ? `${lastUser?.login || item.lastActivation.activatedUserId} — ${formatStatDate(item.lastActivation.activatedAt)}` : "-"}`
+    );
+  });
+
+  return lines.join("\n");
+};
+
+const replyLongText = async (ctx, text) => {
+  const chunks = [];
+  let chunk = "";
+  for (const line of text.split("\n")) {
+    if (`${chunk}\n${line}`.length > 3500) {
+      chunks.push(chunk);
+      chunk = line;
+    } else {
+      chunk = chunk ? `${chunk}\n${line}` : line;
+    }
+  }
+  if (chunk) chunks.push(chunk);
+  for (const part of chunks) await ctx.reply(part);
+};
 
 bot.catch((error) => {
   const message = error instanceof Error ? error.stack || error.message : String(error);
@@ -138,6 +265,7 @@ bot.catch((error) => {
 await bot.api.setMyCommands([
   { command: "start", description: "Поехали" },
   { command: "photo", description: "Открыть фотоотчет" },
+  { command: "refstats", description: "Статистика реферальных ссылок" },
 ]);
 
 bot.command("start", (ctx) => {
@@ -149,6 +277,22 @@ bot.command("photo", (ctx) => {
   const combined = fmt`${b}Фотоотчет${b}\nОтправьте номер магазина, чтобы получить ссылку на фотоотчет.`;
   ctx.reply(combined.text, { entities: combined.entities });
   logUserAction(ctx, "📷 photo_report");
+});
+bot.command(["refstats", "stats"], async (ctx) => {
+  if (!isAdminUser(ctx)) {
+    logUserAction(ctx, "refstats_denied");
+    return ctx.reply("Недостаточно прав.");
+  }
+
+  try {
+    const text = await buildReferralStatsText();
+    logUserAction(ctx, "refstats_view");
+    return replyLongText(ctx, text);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`Referral stats error: ${message}`);
+    return ctx.reply("Не удалось собрать статистику реферальных ссылок.");
+  }
 });
 
 bot.on("message:photo", async (ctx) => {
@@ -167,7 +311,7 @@ bot.on("message:photo", async (ctx) => {
   }
 
   const url = `https://api.telegram.org/file/bot${BOT_TOKEN}/${file.file_path}`;
-  const response = await fetch(url);
+  const response = await (telegramFetch || fetch)(url);
   if (!response.ok) {
     logUserAction(ctx, "❌ photo_file_error", { reason: `download failed: ${response.status}` });
     await ctx.react("👎");

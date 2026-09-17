@@ -37,6 +37,7 @@ export function createReferralService({
   toIsoNow,
   randomBytes,
   logEvent,
+  telegramLogService = null,
   rateLimitMaxAttempts = 8,
   rateLimitWindowMs = 10 * 60 * 1000,
   rateLimitBlockMs = 15 * 60 * 1000
@@ -460,6 +461,12 @@ export function createReferralService({
       activationSource: source,
       trialDays,
       trialUntil
+    });
+    telegramLogService?.notifyReferralActivation({
+      user,
+      owner,
+      activation,
+      referralCodeMask: maskReferralCode(codeRecord.code)
     });
 
     return {
