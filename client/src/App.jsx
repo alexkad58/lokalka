@@ -89,6 +89,8 @@ import HomePage from './components/home/HomePage.jsx';
 import RecountPage from './components/recount/RecountPage.jsx';
 import KeypadSandboxPage from './KeypadSandboxPage.jsx';
 import CodebookPage from './components/codebook/CodebookPage.jsx';
+import QrTestPage from './components/QrTestPage.jsx';
+import { Decoder } from '../../shared/txqr.js';
 
 const TOKEN_KEY = 'lokalka_auth_token';
 const PENDING_INVITE_KEY = 'lokalka_pending_invite';
@@ -327,6 +329,9 @@ export default function App() {
   const [codebookOpen, setCodebookOpen] = useState(() => (
     typeof window !== 'undefined' && window.location.pathname === '/codebook'
   ));
+  const [qrOpen, setQrOpen] = useState(() => (
+    typeof window !== 'undefined' && window.location.pathname === '/qr'
+  ));
   const [tsdPriceModalOpen, setTsdPriceModalOpen] = useState(false);
   const [tsdPriceInput, setTsdPriceInput] = useState('');
   const [tsdResult, setTsdResult] = useState(null);
@@ -344,9 +349,45 @@ export default function App() {
   const keypadRef = useRef(null);
   const blurGuardUntilRef = useRef(0);
   const autoInviteAttemptRef = useRef('');
+  const qrDecoderRef = useRef(new Decoder());
+  const [qrDecoderProgress, setQrDecoderProgress] = useState({ received: 0, required: 0, percent: 0 });
+  const [qrTransferStatus, setQrTransferStatus] = useState('idle');
+  const [qrTransferError, setQrTransferError] = useState('');
+  const [qrDecodedBytes, setQrDecodedBytes] = useState(null);
+
+  const resetQrTransfer = useCallback(() => {
+    qrDecoderRef.current = new Decoder();
+    setQrDecoderProgress({ received: 0, required: 0, percent: 0 });
+    setQrTransferStatus('idle');
+    setQrTransferError('');
+    setQrDecodedBytes(null);
+  }, []);
+
+  const handleQrFrame = useCallback((rawFrame) => {
+    try {
+      const decoder = qrDecoderRef.current;
+      decoder.addFrame(rawFrame);
+      const after = decoder.progress();
+      setQrDecoderProgress(after);
+      setQrTransferError('');
+      if (decoder.isComplete()) {
+        setQrDecodedBytes(decoder.data());
+        setQrTransferStatus('ok');
+      } else {
+        setQrTransferStatus('scanning');
+      }
+    } catch (error) {
+      setQrTransferStatus('error');
+      setQrTransferError(error instanceof Error ? error.message : 'Не удалось обработать QR-кадр');
+    }
+  }, []);
 
   const handleScannedCode = useCallback(async (code) => {
     const rawCode = String(code || '').trim();
+    if (qrOpen) {
+      handleQrFrame(rawCode);
+      return;
+    }
     const normalizedCode = normalizeScannedCode(rawCode);
     const now = Date.now();
     if (!normalizedCode) return;
@@ -425,11 +466,12 @@ export default function App() {
     }
 
     triggerHaptic(70, 'scan');
-  }, [tsdOpen, activeRecount]);
+  }, [qrOpen, handleQrFrame, tsdOpen, activeRecount]);
 
   const scanner = useBarcodeScanner({
     activeRecount,
     tsdOpen,
+    qrOpen,
     onScannedCode: handleScannedCode
   });
 
@@ -482,6 +524,7 @@ export default function App() {
       const path = window.location.pathname;
       setTsdOpen(path === '/tsd');
       setKeypadLabOpen(path === '/keypad-lab');
+      setQrOpen(path === '/qr');
       captureInviteFromUrl();
     };
 
@@ -1542,6 +1585,13 @@ export default function App() {
     setTsdPriceModalOpen(false);
   }
 
+  function closeQr() {
+    scanner.stopScanner();
+    window.history.replaceState({}, '', '/');
+    setQrOpen(false);
+    resetQrTransfer();
+  }
+
   function openCodebook() {
     scanner.stopScanner();
     window.history.pushState({}, '', '/codebook');
@@ -2129,6 +2179,28 @@ export default function App() {
         tsdPriceInput={tsdPriceInput}
         setTsdPriceInput={setTsdPriceInput}
         confirmTsdPrice={confirmTsdPrice}
+      />
+    );
+  }
+
+  if (qrOpen) {
+    return (
+      <QrTestPage
+        scannerOn={scanner.scannerOn}
+        toggleScanner={scanner.toggleScanner}
+        torchOn={scanner.torchOn}
+        toggleTorch={scanner.toggleTorch}
+        videoRef={scanner.videoRef}
+        focusScannerCamera={scanner.focusScannerCamera}
+        handleScannerDoubleClick={scanner.handleScannerDoubleClick}
+        scannerStatus={scanner.scannerStatus}
+        lastCode={scanner.lastCode}
+        onReset={resetQrTransfer}
+        decoderProgress={qrDecoderProgress}
+        transferStatus={qrTransferStatus}
+        transferError={qrTransferError}
+        decodedBytes={qrDecodedBytes}
+        close={closeQr}
       />
     );
   }

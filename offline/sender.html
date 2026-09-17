@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Lokalka TXQR</title>
+    <link rel="stylesheet" href="./sender.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="page-header">
+        <p class="eyebrow">LOKALKA / TXQR</p>
+        <h1>Передача PDF через QR</h1>
+        <p class="intro">Выберите PDF, затем наведите сканер сайта на анимацию.</p>
+      </header>
+
+      <section class="workspace" aria-label="Передача PDF">
+        <div class="controls">
+          <label class="file-picker">
+            <span>PDF-файл</span>
+            <input id="file-input" type="file" accept="application/pdf,.pdf" />
+          </label>
+
+          <div class="settings-grid">
+            <label>
+              <span>Размер блока</span>
+              <select id="chunk-size">
+                <option value="500">500 байт</option>
+                <option value="700" selected>700 байт</option>
+                <option value="900">900 байт</option>
+              </select>
+            </label>
+            <label>
+              <span>Избыточность</span>
+              <select id="redundancy">
+                <option value="0.5" selected>50%</option>
+                <option value="0.75">75%</option>
+                <option value="1">100%</option>
+              </select>
+            </label>
+          </div>
+
+          <div class="file-summary" id="file-summary">PDF еще не выбран</div>
+          <div class="actions">
+            <button id="start-button" type="button" disabled>Запустить передачу</button>
+            <button id="stop-button" type="button" class="secondary" disabled>Остановить</button>
+          </div>
+          <div class="status" id="status" role="status">Готово к выбору файла</div>
+        </div>
+
+        <div class="qr-stage">
+          <canvas id="qr-canvas" width="560" height="560" aria-label="Текущий QR-кадр"></canvas>
+          <div class="progress-line">
+            <span id="frame-counter">Нет активной передачи</span>
+            <span id="elapsed">00:00</span>
+          </div>
+          <progress id="progress" value="0" max="1"></progress>
+        </div>
+      </section>
+    </main>
+    <script type="module" src="./sender-main.js"></script>
+  </body>
+</html>
