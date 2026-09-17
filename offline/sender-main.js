@@ -6,6 +6,7 @@ import { extractRecountMeta, parseDocumentLines } from '../shared/recount-parser
 const fileInput = document.querySelector('#file-input');
 const chunkSizeInput = document.querySelector('#chunk-size');
 const redundancyInput = document.querySelector('#redundancy');
+const frameDurationInput = document.querySelector('#frame-duration');
 const fileSummary = document.querySelector('#file-summary');
 const parseSummary = document.querySelector('#parse-summary');
 const startButton = document.querySelector('#start-button');
@@ -15,12 +16,16 @@ const canvas = document.querySelector('#qr-canvas');
 const frameCounter = document.querySelector('#frame-counter');
 const elapsed = document.querySelector('#elapsed');
 const progress = document.querySelector('#progress');
+const ctx = canvas.getContext('2d');
 
 let selectedFile = null;
 let frames = [];
+let frameImages = [];
 let frameIndex = 0;
-let timerId = 0;
+let rafId = 0;
 let startedAt = 0;
+let nextFrameAt = 0;
+let playing = false;
 
 GlobalWorkerOptions.workerSrc = globalThis.__txqrPdfWorkerSrc || '';
 
@@ -78,35 +83,70 @@ function setStatus(message, tone = '') {
 }
 
 function stopTransfer(message = 'Передача остановлена') {
-  if (timerId) window.clearTimeout(timerId);
-  timerId = 0;
+  playing = false;
+  if (rafId) window.cancelAnimationFrame(rafId);
+  rafId = 0;
   stopButton.disabled = true;
   startButton.disabled = !selectedFile;
   setStatus(message);
 }
 
-async function renderFrame() {
-  if (!frames.length) return;
-  await QRCode.toCanvas(canvas, frames[frameIndex], {
-    errorCorrectionLevel: 'M',
-    margin: 2,
-    width: 560
-  });
-  frameCounter.textContent = `Кадр ${frameIndex + 1} из ${frames.length}`;
-  progress.value = (frameIndex + 1) / frames.length;
+// Render every QR frame to an off-screen bitmap up front so playback only has to
+// blit an already-decoded image each tick instead of re-running QR encoding live.
+async function buildFrameImages(sourceFrames, onProgress) {
+  const images = new Array(sourceFrames.length);
+  const concurrency = 6;
+  let cursor = 0;
+
+  async function worker() {
+    while (cursor < sourceFrames.length) {
+      const index = cursor;
+      cursor += 1;
+      const offscreen = document.createElement('canvas');
+      await QRCode.toCanvas(offscreen, sourceFrames[index], {
+        errorCorrectionLevel: 'M',
+        margin: 2,
+        width: 560
+      });
+      images[index] = await createImageBitmap(offscreen);
+      onProgress(index + 1, sourceFrames.length);
+    }
+  }
+
+  await Promise.all(Array.from({ length: Math.min(concurrency, sourceFrames.length) }, worker));
+  return images;
+}
+
+function drawFrame(index) {
+  const image = frameImages[index];
+  if (!image) return;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+  frameCounter.textContent = `Кадр ${index + 1} из ${frameImages.length}`;
+  progress.value = (index + 1) / frameImages.length;
   formatElapsed();
 }
 
-async function showNextFrame() {
-  if (!frames.length) return;
-  try {
-    await renderFrame();
-    frameIndex = (frameIndex + 1) % frames.length;
-    timerId = window.setTimeout(showNextFrame, 220);
-  } catch (error) {
-    stopTransfer('Не удалось сформировать QR-код');
-    setStatus(error instanceof Error ? error.message : 'Не удалось сформировать QR-код', 'error');
+function playbackTick(timestamp) {
+  if (!playing) return;
+  if (timestamp >= nextFrameAt) {
+    drawFrame(frameIndex);
+    frameIndex = (frameIndex + 1) % frameImages.length;
+    const frameDuration = Number(frameDurationInput.value) || 220;
+    // Advance from the scheduled time (not "now") so occasional slow ticks don't
+    // accumulate drift across a long-running transfer.
+    nextFrameAt = (nextFrameAt || timestamp) + frameDuration;
+    if (timestamp - nextFrameAt > frameDuration) nextFrameAt = timestamp + frameDuration;
   }
+  rafId = window.requestAnimationFrame(playbackTick);
+}
+
+function startPlayback() {
+  if (!frameImages.length) return;
+  playing = true;
+  frameIndex = 0;
+  nextFrameAt = 0;
+  rafId = window.requestAnimationFrame(playbackTick);
 }
 
 fileInput.addEventListener('change', () => {
@@ -145,11 +185,13 @@ startButton.addEventListener('click', async () => {
       redundancy: Number(redundancyInput.value),
       sessionId: undefined
     });
-    frameIndex = 0;
+    frameImages = await buildFrameImages(frames, (done, total) => {
+      setStatus(`Готовим QR-кадры: ${done} из ${total}...`);
+    });
     startedAt = Date.now();
     stopButton.disabled = false;
     setStatus(`Передача идет · ${frames.length} QR-кадров`);
-    await showNextFrame();
+    startPlayback();
   } catch (error) {
     stopTransfer();
     setStatus(error instanceof Error ? error.message : 'Не удалось подготовить файл', 'error');

@@ -12,7 +12,7 @@ export function useBarcodeScanner({ activeRecount, tsdOpen, qrOpen, onScannedCod
 
   const videoRef = useRef(null);
   const scannerStreamRef = useRef(null);
-  const scanRafRef = useRef(0);
+  const scanCancelRef = useRef(null);
   const detectorRef = useRef(null);
   const zxingReaderRef = useRef(null);
   const zxingControlsRef = useRef(null);
@@ -44,6 +44,18 @@ export function useBarcodeScanner({ activeRecount, tsdOpen, qrOpen, onScannedCod
     }, 220);
   }
 
+  // Prefer requestVideoFrameCallback: it fires once per actual decoded camera frame
+  // instead of on every display refresh, so we never re-scan a stale frame or fall
+  // behind the camera while a previous detect() is still resolving.
+  function scheduleScan(video) {
+    if (typeof video.requestVideoFrameCallback === 'function') {
+      const handle = video.requestVideoFrameCallback(scanBarcodeFrame);
+      return () => video.cancelVideoFrameCallback(handle);
+    }
+    const handle = requestAnimationFrame(scanBarcodeFrame);
+    return () => cancelAnimationFrame(handle);
+  }
+
   async function scanBarcodeFrame() {
     const video = videoRef.current;
     const detector = detectorRef.current;
@@ -67,13 +79,13 @@ export function useBarcodeScanner({ activeRecount, tsdOpen, qrOpen, onScannedCod
       }
     }
 
-    scanRafRef.current = requestAnimationFrame(scanBarcodeFrame);
+    scanCancelRef.current = scheduleScan(video);
   }
 
   async function switchToZxingFallback() {
-    if (scanRafRef.current) {
-      cancelAnimationFrame(scanRafRef.current);
-      scanRafRef.current = 0;
+    if (scanCancelRef.current) {
+      scanCancelRef.current();
+      scanCancelRef.current = null;
     }
     const video = videoRef.current;
     if (!video) return;
@@ -132,7 +144,7 @@ export function useBarcodeScanner({ activeRecount, tsdOpen, qrOpen, onScannedCod
             detectFailStreakRef.current = 0;
             setScannerOn(true);
             setScannerStatus('Наведите на штрихкод');
-            scanRafRef.current = requestAnimationFrame(scanBarcodeFrame);
+            scanCancelRef.current = scheduleScan(video);
             return;
           }
         } catch {
@@ -163,9 +175,9 @@ export function useBarcodeScanner({ activeRecount, tsdOpen, qrOpen, onScannedCod
     setScannerStatus('Сканер выключен');
     detectFailStreakRef.current = 0;
 
-    if (scanRafRef.current) {
-      cancelAnimationFrame(scanRafRef.current);
-      scanRafRef.current = 0;
+    if (scanCancelRef.current) {
+      scanCancelRef.current();
+      scanCancelRef.current = null;
     }
 
     zxingControlsRef.current?.stop?.();
