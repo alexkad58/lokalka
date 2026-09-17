@@ -3,7 +3,7 @@ import { supportsBarcodeDetector } from '../utils/barcode.js';
 import { track } from '../analytics.js';
 import { unlockFeedbackAudio } from '../utils/audio.js';
 
-export function useBarcodeScanner({ activeRecount, tsdOpen, onScannedCode }) {
+export function useBarcodeScanner({ activeRecount, tsdOpen, qrOpen, onScannedCode }) {
   const [scannerOn, setScannerOn] = useState(false);
   const [scannerStatus, setScannerStatus] = useState('Сканер выключен');
   const [lastCode, setLastCode] = useState('');
@@ -98,7 +98,7 @@ export function useBarcodeScanner({ activeRecount, tsdOpen, onScannedCode }) {
   async function startScanner() {
     const video = videoRef.current;
     if (!video) return;
-    if (!activeRecount?.items?.length && !tsdOpen) {
+    if (!activeRecount?.items?.length && !tsdOpen && !qrOpen) {
       setScannerStatus('Сначала загрузите PDF');
       return;
     }
@@ -118,7 +118,7 @@ export function useBarcodeScanner({ activeRecount, tsdOpen, onScannedCode }) {
       scannerStreamRef.current = stream;
       video.srcObject = stream;
       await video.play();
-      track('scanner_started', { area: tsdOpen ? 'tsd' : 'recount' });
+      track('scanner_started', { area: tsdOpen ? 'tsd' : qrOpen ? 'qr' : 'recount' });
 
       if (supportsBarcodeDetector()) {
         try {
