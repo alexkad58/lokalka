@@ -1,10 +1,12 @@
 import SettingsModal from './SettingsModal.jsx';
+import { QrCode } from 'lucide-react';
 import { formatRub, formatStartDate } from '../../utils/formatting.js';
 import { formatPatchNoteDate, PATCHNOTE_PREVIEW_LIMIT } from '../../utils/patchnotes.js';
 
 export default function HomePage({
   fileInputRef,
   handleUpload,
+  openQr,
   user,
   openSettings,
   handleLogout,
@@ -107,9 +109,15 @@ export default function HomePage({
         {!homeLoading && !activeSummary ? (
           <div className="compact-card">
             <div>Для начала нового просчета загрузите PDF-файл</div>
-            <button type="button" onClick={() => fileInputRef.current?.click()} disabled={loading}>
-              {loading ? 'Загрузка...' : 'Загрузить .PDF'}
-            </button>
+            <div className="recount-create-actions">
+              <button type="button" onClick={() => fileInputRef.current?.click()} disabled={loading}>
+                {loading ? 'Загрузка...' : 'Загрузить .PDF'}
+              </button>
+              <button type="button" className="qr-import-button" onClick={openQr} disabled={loading}>
+                <QrCode size={20} aria-hidden="true" />
+                <span>QR</span>
+              </button>
+            </div>
           </div>
         ) : null}
       </section>

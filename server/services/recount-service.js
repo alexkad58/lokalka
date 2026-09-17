@@ -139,6 +139,33 @@ export function createRecountService({
     return recount;
   }
 
+  async function createFromPayload({ userId, payload }) {
+    const now = toIsoNow();
+    const recount = {
+      id: createId('r'),
+      userId,
+      status: 'active',
+      docId: createDocId(),
+      sourceFileName: String(payload.sourceFileName || 'TXQR.pdf').trim(),
+      storeLabel: String(payload.storeLabel || '').trim(),
+      storeNumber: String(payload.storeNumber || '').trim(),
+      storeAddress: String(payload.storeAddress || '').trim(),
+      createdAt: now,
+      updatedAt: now,
+      completedAt: null,
+      items: payload.items.map(item => ({ ...item })),
+      values: {},
+      search: '',
+      barcodeCache: {},
+      counterName: null,
+      groupName: null
+    };
+
+    db.recounts.push(recount);
+    await saveDb();
+    return recount;
+  }
+
   async function deleteForUser(userId, recountId) {
     const recount = findByUser(userId, recountId);
     if (!recount) return null;
@@ -207,6 +234,7 @@ export function createRecountService({
     findActive,
     listForUser,
     createFromText,
+    createFromPayload,
     deleteForUser,
     reopenForUser,
     saveProgressForUser,

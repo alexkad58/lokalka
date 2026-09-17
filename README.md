@@ -57,7 +57,7 @@ npm run dev
 - `SHOP_API_TOKEN_HEADER`, `SHOP_API_REFRESH_HEADER`, `SHOP_API_TOKEN_PREFIX`;
 - `SHOP_API_CITY_ID`, `SHOP_API_SHOP_ID`, `SHOP_API_USER_AGENT`, `SHOP_API_STDOUT_LOGS`;
 - `TG_TOKEN` или `TOKEN`, `TSD_BOT_ENABLED`, `TSD_PROXY`;
-- `LOKALKA_DATA_FILE`, `LOKALKA_BARCODE_CACHE_FILE` для нестандартных путей storage.
+- `LOKALKA_DATA_FILE`, `LOKALKA_BARCODE_CACHE_FILE`, `LOKALKA_PATCHNOTES_FILE` для нестандартных путей runtime-файлов.
 
 Секреты и runtime-файлы `server/.env`, `storage.json` и `barcode-cache.json` исключены из Git.
 
@@ -99,6 +99,8 @@ chmod +x deploy.sh
 - установку зависимостей для `server` и `client`
 - `npm run build` для фронтенда
 - `pm2 restart lokalka-api --update-env`
+
+> `deploy.sh` хранит патчноуты вне каталога Git в `/var/lib/lokalka-data/patchnotes.json`, поэтому `git reset --hard` при деплое их не сбрасывает.
 
 ## Автодеплой через GitHub Actions
 
