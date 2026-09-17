@@ -365,6 +365,15 @@ export async function createRecountFromPdf(file) {
   return readJsonOrThrow(response, 'Не удалось обработать PDF');
 }
 
+export async function createRecountFromQr(payload) {
+  const response = await fetch('/api/recounts/from-qr', {
+    method: 'POST',
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify(payload)
+  });
+  return readJsonOrThrow(response, 'Не удалось создать просчет из QR');
+}
+
 export async function saveRecountProgress(id, payload) {
   const response = await fetch(`/api/recounts/${encodeURIComponent(id)}/progress`, {
     method: 'POST',

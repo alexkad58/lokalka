@@ -1,10 +1,13 @@
 import QRCode from 'qrcode';
+import { GlobalWorkerOptions, getDocument } from '../client/node_modules/pdfjs-dist/legacy/build/pdf.mjs';
 import { encode } from '../shared/txqr.js';
+import { extractRecountMeta, parseDocumentLines } from '../shared/recount-parser.js';
 
 const fileInput = document.querySelector('#file-input');
 const chunkSizeInput = document.querySelector('#chunk-size');
 const redundancyInput = document.querySelector('#redundancy');
 const fileSummary = document.querySelector('#file-summary');
+const parseSummary = document.querySelector('#parse-summary');
 const startButton = document.querySelector('#start-button');
 const stopButton = document.querySelector('#stop-button');
 const status = document.querySelector('#status');
@@ -18,6 +21,42 @@ let frames = [];
 let frameIndex = 0;
 let timerId = 0;
 let startedAt = 0;
+
+GlobalWorkerOptions.workerSrc = globalThis.__txqrPdfWorkerSrc || '';
+
+function buildPageText(items) {
+  const rows = [];
+  for (const item of items) {
+    const text = String(item.str || '').trim();
+    if (!text) continue;
+    const y = Number(item.transform?.[5] || 0);
+    let row = rows.find(candidate => Math.abs(candidate.y - y) <= 2);
+    if (!row) {
+      row = { y, items: [] };
+      rows.push(row);
+    }
+    row.items.push({ x: Number(item.transform?.[4] || 0), text });
+  }
+  return rows
+    .sort((left, right) => right.y - left.y)
+    .map(row => row.items.sort((left, right) => left.x - right.x).map(item => item.text).join(' '))
+    .join('\n');
+}
+
+async function parsePdf(file) {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const document = await getDocument({ data: bytes }).promise;
+  const pages = [];
+  for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
+    const page = await document.getPage(pageNumber);
+    const content = await page.getTextContent();
+    pages.push(buildPageText(content.items));
+  }
+  const text = pages.join('\n');
+  const items = parseDocumentLines(text);
+  const meta = extractRecountMeta(text);
+  return { bytes, text, items, meta, pages: document.numPages };
+}
 
 function formatBytes(value) {
   if (value < 1024) return `${value} Б`;
@@ -75,9 +114,11 @@ fileInput.addEventListener('change', () => {
   stopTransfer();
   if (!selectedFile) {
     fileSummary.textContent = 'PDF еще не выбран';
+    parseSummary.textContent = 'Данные еще не разобраны';
     return;
   }
   fileSummary.textContent = `${selectedFile.name} · ${formatBytes(selectedFile.size)}`;
+  parseSummary.textContent = 'Нажмите запуск для разбора PDF';
   setStatus('Файл выбран. Можно запускать передачу.');
 });
 
@@ -88,10 +129,21 @@ startButton.addEventListener('click', async () => {
   setStatus('Подготовка QR-кадров...');
 
   try {
-    const bytes = new Uint8Array(await selectedFile.arrayBuffer());
-    frames = encode(bytes, {
+    const parsed = await parsePdf(selectedFile);
+    if (!parsed.items.length) throw new Error('В PDF не найдены товарные позиции');
+    const payload = {
+      version: 1,
+      sourceFileName: selectedFile.name,
+      pages: parsed.pages,
+      ...parsed.meta,
+      items: parsed.items
+    };
+    const payloadBytes = new TextEncoder().encode(JSON.stringify(payload));
+    parseSummary.textContent = `Разобрано позиций: ${parsed.items.length} · ${formatBytes(payloadBytes.length)} данных`;
+    frames = encode(payloadBytes, {
       chunkSize: Number(chunkSizeInput.value),
-      redundancy: Number(redundancyInput.value)
+      redundancy: Number(redundancyInput.value),
+      sessionId: undefined
     });
     frameIndex = 0;
     startedAt = Date.now();

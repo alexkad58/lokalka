@@ -86,6 +86,30 @@ export function createRecountRoutes({
       return { ok: true, recount: sanitizeActiveRecount(recount) };
     });
 
+    app.post('/api/recounts/from-qr', { preHandler: [authenticate, requireServiceAccess] }, async (request, reply) => {
+      const active = findUserActiveRecount(request.user.id);
+      if (active) {
+        return reply.code(409).send({ ok: false, error: 'У вас уже есть активный просчет' });
+      }
+
+      const payload = request.body && typeof request.body === 'object' ? request.body : {};
+      const validItems = Array.isArray(payload.items)
+        && payload.items.length > 0
+        && payload.items.every(item => item && typeof item === 'object' && String(item.code || '').trim());
+      if (payload.version !== 1 || !validItems) {
+        return reply.code(400).send({ ok: false, error: 'QR содержит объект неизвестного формата' });
+      }
+
+      const recount = await recountService.createFromPayload({ userId: request.user.id, payload });
+      logEvent('info', 'recount-create-from-qr-success', buildRequestLogMeta(request, {
+        recountId: recount.id,
+        docId: recount.docId,
+        sourceFileName: recount.sourceFileName,
+        itemsCount: recount.items.length
+      }));
+      return { ok: true, recount: sanitizeActiveRecount(recount) };
+    });
+
     app.post('/api/recounts/:id/progress', { preHandler: [authenticate, requireServiceAccess] }, async (request, reply) => {
       const { id } = request.params;
       const body = request.body && typeof request.body === 'object' ? request.body : {};

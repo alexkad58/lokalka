@@ -11,6 +11,8 @@
   "dependencies": {
     "@zxing/browser": "^0.1.5",
     "lokalka": "file:..",
+    "lucide-react": "^1.47.0",
+    "pdfjs-dist": "^6.3.289",
     "posthog-js": "^1.418.10",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"

@@ -189,6 +189,32 @@ test('admin token settings never return the full token', async () => {
   assert.equal(responseJson(readResponse).token, undefined);
 });
 
+test('restored TXQR payload creates an active recount', async () => {
+  const response = await jsonRequest(
+    'POST',
+    '/api/recounts/from-qr',
+    {
+      version: 1,
+      sourceFileName: 'restored.pdf',
+      storeLabel: 'Тестовый магазин',
+      items: [{ code: '12345', name: 'Тестовый товар', docQty: 2, price: 10 }]
+    },
+    authHeaders(securityToken || userToken, securityToken ? 'security-device' : 'device-b')
+  );
+
+  assert.equal(response.statusCode, 200);
+  const body = responseJson(response);
+  assert.equal(body.recount.sourceFileName, 'restored.pdf');
+  assert.equal(body.recount.items[0].code, '12345');
+
+  const deleteResponse = await app.inject({
+    method: 'DELETE',
+    url: `/api/recounts/${body.recount.id}`,
+    headers: authHeaders(userToken, 'device-b')
+  });
+  assert.equal(deleteResponse.statusCode, 200);
+});
+
 test('admin can update contact links and they are exposed to users', async () => {
   const saveResponse = await jsonRequest(
     'POST',

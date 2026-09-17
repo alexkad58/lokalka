@@ -14,6 +14,7 @@ import {
   completeRecount,
   createAdminPatchNote,
   createRecountFromPdf,
+  createRecountFromQr,
   deleteAdminPatchNote,
   deleteAdminUser,
   deleteRecount,
@@ -350,17 +351,19 @@ export default function App() {
   const blurGuardUntilRef = useRef(0);
   const autoInviteAttemptRef = useRef('');
   const qrDecoderRef = useRef(new Decoder());
+  const qrSubmittingRef = useRef(false);
   const [qrDecoderProgress, setQrDecoderProgress] = useState({ received: 0, required: 0, percent: 0 });
   const [qrTransferStatus, setQrTransferStatus] = useState('idle');
   const [qrTransferError, setQrTransferError] = useState('');
-  const [qrDecodedBytes, setQrDecodedBytes] = useState(null);
+  const [qrDecodedPayload, setQrDecodedPayload] = useState(null);
 
   const resetQrTransfer = useCallback(() => {
     qrDecoderRef.current = new Decoder();
+    qrSubmittingRef.current = false;
     setQrDecoderProgress({ received: 0, required: 0, percent: 0 });
     setQrTransferStatus('idle');
     setQrTransferError('');
-    setQrDecodedBytes(null);
+    setQrDecodedPayload(null);
   }, []);
 
   const handleQrFrame = useCallback((rawFrame) => {
@@ -371,7 +374,12 @@ export default function App() {
       setQrDecoderProgress(after);
       setQrTransferError('');
       if (decoder.isComplete()) {
-        setQrDecodedBytes(decoder.data());
+        const decodedBytes = decoder.data();
+        const payload = JSON.parse(new TextDecoder().decode(decodedBytes));
+        if (payload?.version !== 1 || !Array.isArray(payload.items)) {
+          throw new Error('QR содержит объект неизвестного формата');
+        }
+        setQrDecodedPayload(payload);
         setQrTransferStatus('ok');
       } else {
         setQrTransferStatus('scanning');
@@ -474,6 +482,37 @@ export default function App() {
     qrOpen,
     onScannedCode: handleScannedCode
   });
+
+  useEffect(() => {
+    if (!qrOpen) return undefined;
+    const startTimer = window.setTimeout(() => void scanner.startScanner(), 0);
+    return () => window.clearTimeout(startTimer);
+  }, [qrOpen, user]);
+
+  useEffect(() => {
+    if (!qrOpen || !qrDecodedPayload || qrSubmittingRef.current) return;
+    qrSubmittingRef.current = true;
+    setQrTransferStatus('uploading');
+    setQrTransferError('');
+
+    void createRecountFromQr(qrDecodedPayload)
+      .then(({ recount }) => {
+        scanner.stopScanner();
+        track('recount_created_from_qr');
+        setActiveRecount(recount);
+        setValues(recount.values || {});
+        setSearch(recount.search || '');
+        setBindTargetBarcode('');
+        setActiveSummary(null);
+        window.history.replaceState({}, '', '/');
+        setQrOpen(false);
+      })
+      .catch(error => {
+        qrSubmittingRef.current = false;
+        setQrTransferStatus('error');
+        setQrTransferError(error instanceof Error ? error.message : 'Не удалось создать просчет');
+      });
+  }, [qrOpen, qrDecodedPayload]);
 
   useEffect(() => {
     if (!activeFactCode) return undefined;
@@ -1592,6 +1631,13 @@ export default function App() {
     resetQrTransfer();
   }
 
+  function openQr() {
+    scanner.stopScanner();
+    resetQrTransfer();
+    window.history.pushState({}, '', '/qr');
+    setQrOpen(true);
+  }
+
   function openCodebook() {
     scanner.stopScanner();
     window.history.pushState({}, '', '/codebook');
@@ -2187,19 +2233,14 @@ export default function App() {
     return (
       <QrTestPage
         scannerOn={scanner.scannerOn}
-        toggleScanner={scanner.toggleScanner}
-        torchOn={scanner.torchOn}
-        toggleTorch={scanner.toggleTorch}
+        startScanner={scanner.startScanner}
         videoRef={scanner.videoRef}
         focusScannerCamera={scanner.focusScannerCamera}
-        handleScannerDoubleClick={scanner.handleScannerDoubleClick}
         scannerStatus={scanner.scannerStatus}
-        lastCode={scanner.lastCode}
-        onReset={resetQrTransfer}
         decoderProgress={qrDecoderProgress}
         transferStatus={qrTransferStatus}
         transferError={qrTransferError}
-        decodedBytes={qrDecodedBytes}
+        decodedPayload={qrDecodedPayload}
         close={closeQr}
       />
     );
@@ -2210,6 +2251,7 @@ export default function App() {
       <HomePage
         fileInputRef={fileInputRef}
         handleUpload={handleUpload}
+        openQr={openQr}
         user={user}
         openSettings={openSettings}
         handleLogout={handleLogout}
