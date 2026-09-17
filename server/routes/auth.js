@@ -14,7 +14,8 @@ export function createAuthRoutes({
   publicUser,
   authenticate,
   buildRequestLogMeta,
-  referralService
+  referralService,
+  telegramLogService = null
 }) {
   async function applyInviteIfProvided({ user, inviteRaw, source, request }) {
     const invite = referralService.normalizeReferralCode(inviteRaw);
@@ -83,6 +84,7 @@ export function createAuthRoutes({
       db.users.push(user);
       await saveDb();
       logEvent('info', 'register-success', { login: user.login, userId: user.id, ip: getRequestIp(request) });
+      telegramLogService?.notifyRegistration({ user, ip: getRequestIp(request) });
 
       const token = await sessionManager.createForUser(user, request);
       const referralActivation = await applyInviteIfProvided({ user, inviteRaw: body.invite, source: 'register-invite', request });

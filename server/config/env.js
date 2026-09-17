@@ -62,6 +62,8 @@ export const config = {
     proxy: readString('TSD_PROXY').trim(),
     telegramToken: readString('TG_TOKEN'),
     fallbackToken: readString('TOKEN'),
+    groupId: readString('TSD_GROUP_ID').trim(),
+    adminId: readString('TSD_ADMIN_ID').trim(),
     entryFile: path.resolve(projectDirectory, 'tsd', 'index.js'),
     workingDirectory: projectDirectory
   }

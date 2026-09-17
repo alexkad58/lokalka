@@ -16,6 +16,7 @@ import { createRecountService } from './services/recount-service.js';
 import { createReferralService } from './services/referral-service.js';
 import { createShopApiService } from './services/shop-api-service.js';
 import { createTsdBotService } from './services/tsd-bot-service.js';
+import { createTelegramLogService } from './services/telegram-log-service.js';
 import { configurePdfFont } from './pdf/fonts.js';
 import { buildTableRows, drawCell } from './pdf/table.js';
 import { createPdfService } from './services/pdf-service.js';
@@ -241,6 +242,11 @@ const tsdBotService = createTsdBotService({
   logEvent
 });
 
+const telegramLogService = createTelegramLogService({
+  config: config.tsd,
+  logEvent
+});
+
 const pdfService = createPdfService({
   configurePdfFont,
   drawCell,
@@ -300,7 +306,8 @@ const referralService = createReferralService({
   createId,
   toIsoNow,
   randomBytes,
-  logEvent
+  logEvent,
+  telegramLogService
 });
 referralService.ensureReferralState();
 
@@ -409,7 +416,8 @@ app.register(createAuthRoutes({
   publicUser,
   authenticate,
   buildRequestLogMeta,
-  referralService
+  referralService,
+  telegramLogService
 }));
 app.register(createAccountRoutes({
   authenticate,
@@ -478,7 +486,8 @@ app.register(createRecountRoutes({
   PDFParse,
   buildPdfBufferFromRecount: pdfService.buildPdfBufferFromRecount,
   parseDocumentLines,
-  shopApiService
+  shopApiService,
+  telegramLogService
 }));
 
 export async function initializeServer() {

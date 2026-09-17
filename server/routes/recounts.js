@@ -14,7 +14,8 @@ export function createRecountRoutes({
   PDFParse,
   buildPdfBufferFromRecount,
   parseDocumentLines,
-  shopApiService
+  shopApiService,
+  telegramLogService = null
 }) {
   return async function recountRoutes(app) {
     app.delete('/api/recounts/:id', { preHandler: [authenticate, requireServiceAccess] }, async (request, reply) => {
@@ -83,6 +84,7 @@ export function createRecountRoutes({
       await parser.destroy();
       const recount = await recountService.createFromText({ userId: request.user.id, sourceFileName: file.filename, text: textResult.text });
       logEvent('info', 'recount-create-success', buildRequestLogMeta(request, { recountId: recount.id, docId: recount.docId, sourceFileName: recount.sourceFileName, itemsCount: recount.items.length }));
+      telegramLogService?.notifyRecountStarted({ user: request.user, recount, source: file.filename });
       return { ok: true, recount: sanitizeActiveRecount(recount) };
     });
 
@@ -107,6 +109,7 @@ export function createRecountRoutes({
         sourceFileName: recount.sourceFileName,
         itemsCount: recount.items.length
       }));
+      telegramLogService?.notifyRecountStarted({ user: request.user, recount, source: 'QR' });
       return { ok: true, recount: sanitizeActiveRecount(recount) };
     });
 
@@ -151,6 +154,8 @@ export function createRecountRoutes({
       }
 
       const recount = result.recount;
+      const summary = buildRecountSummary(recount);
+      telegramLogService?.notifyRecountCompleted({ user: request.user, recount, summary });
       if (withoutPdf) {
         logEvent('info', 'recount-complete-without-pdf', buildRequestLogMeta(request, { recountId: recount.id, docId: recount.docId, updateCompletionTime }));
         return { ok: true, recount: sanitizeActiveRecount(recount) };
