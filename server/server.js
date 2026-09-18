@@ -144,6 +144,7 @@ const databaseStore = createJsonStore({
     securityRole: Boolean(user.securityRole),
     subscriptionUntil: user.subscriptionUntil ? String(user.subscriptionUntil) : null,
     deviceId: user?.deviceId ? normalizeDeviceId(user.deviceId) : null,
+    deviceBindingDisabled: user.deviceBindingDisabled ?? true,
     referralUsedAt: user?.referralUsedAt ? String(user.referralUsedAt) : null,
     referralActivationId: user?.referralActivationId ? String(user.referralActivationId) : null
   }),

@@ -67,6 +67,7 @@ export function createUsersService({
       securityRole: false,
       subscriptionUntil: null,
       deviceId: null,
+      deviceBindingDisabled: true,
       referralUsedAt: null,
       referralActivationId: null
     });
@@ -108,7 +109,7 @@ export function createUsersService({
       subscriptionUntil: user.subscriptionUntil || null,
       subscriptionActive: hasActiveSubscription(user),
       deviceBound: Boolean(user.deviceId),
-      deviceBindingDisabled: Boolean(user.deviceBindingDisabled),
+      deviceBindingDisabled: user.deviceBindingDisabled ?? true,
       defaultCounterName: user.defaultCounterName || '',
       referralUsedAt: user.referralUsedAt || null,
       referralActivationId: user.referralActivationId || null,

@@ -2326,6 +2326,8 @@ export default function App() {
       toggleTorch={scanner.toggleTorch}
       videoRef={scanner.videoRef}
       focusScannerCamera={scanner.focusScannerCamera}
+      adjustScannerZoom={scanner.adjustScannerZoom}
+      scannerZoom={scanner.scannerZoom}
       handleScannerDoubleClick={scanner.handleScannerDoubleClick}
       loading={loading}
       scannerStatus={scanner.scannerStatus}

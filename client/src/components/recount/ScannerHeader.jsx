@@ -1,3 +1,4 @@
+import { useRef } from 'react';
 import { formatRub } from '../../utils/formatting.js';
 
 function formatBarcodeTail(barcode) {
@@ -10,6 +11,8 @@ export default function ScannerHeader({
   scannerOn,
   videoRef,
   focusScannerCamera,
+  adjustScannerZoom,
+  scannerZoom,
   handleScannerDoubleClick,
   loading,
   scannerStatus,
@@ -20,12 +23,33 @@ export default function ScannerHeader({
   bindTargetBarcode,
   hiddenCompletedMatch
 }) {
+  const swipeStartRef = useRef(null);
+
+  function handlePointerDown(event) {
+    if (!scannerOn || event.pointerType === 'mouse') return;
+    swipeStartRef.current = { x: event.clientX, y: event.clientY };
+  }
+
+  function handlePointerUp(event) {
+    const start = swipeStartRef.current;
+    swipeStartRef.current = null;
+    if (!start) return;
+
+    const deltaX = event.clientX - start.x;
+    const deltaY = event.clientY - start.y;
+    if (Math.abs(deltaX) < 36 || Math.abs(deltaX) <= Math.abs(deltaY)) return;
+    void adjustScannerZoom(Math.sign(deltaX));
+  }
+
   return (
     <header className={`scanner-shell ${scanSuccessFlash ? 'scan-success-flash' : ''}`}>
       <div
         className={`scanner-viewport ${scannerOn ? 'active' : ''}`}
         onClick={() => void focusScannerCamera()}
         onDoubleClick={handleScannerDoubleClick}
+        onPointerDown={handlePointerDown}
+        onPointerUp={handlePointerUp}
+        onPointerCancel={() => { swipeStartRef.current = null; }}
       >
         <video
           ref={videoRef}
@@ -34,6 +58,9 @@ export default function ScannerHeader({
           playsInline
         />
         <div className="scanner-guide" />
+        {scannerZoom != null ? (
+          <span className="scanner-zoom" aria-live="polite">{Number(scannerZoom).toFixed(1)}x</span>
+        ) : null}
       </div>
       <div className="scanner-meta">
         <span>{loading ? 'Подождите...' : scannerStatus}</span>

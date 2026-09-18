@@ -71,6 +71,7 @@ const bootstrapScript = [
 html = html
   .replace(scriptMatch[0], `<script type="module">${bootstrapScript}</script>`)
   .replace(styleMatch[0], `<style>${style}</style>`);
+html = html.replace(/\r\n/g, '\n');
 
 const finalPath = resolve(offlineRoot, 'txqr-sender.html');
 await writeFile(finalPath, html, 'utf8');

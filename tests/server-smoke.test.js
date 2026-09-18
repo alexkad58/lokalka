@@ -100,6 +100,7 @@ test('register, login, wrong password and auth/me contracts', async () => {
   assert.equal(registered.ok, true);
   assert.ok(registered.token);
   assert.equal(registered.user.login, 'smoke-user');
+  assert.equal(registered.user.deviceBindingDisabled, true);
   userToken = registered.token;
   userId = registered.user.id;
 
@@ -121,7 +122,7 @@ test('register, login, wrong password and auth/me contracts', async () => {
   assert.equal(responseJson(meResponse).user.id, userId);
 });
 
-test('admin can activate a user, enforce device binding, then disable it', async () => {
+test('admin can activate a user, enable device binding, then disable it again', async () => {
   const adminLoginResponse = await jsonRequest(
     'POST',
     '/api/auth/login',
@@ -139,6 +140,15 @@ test('admin can activate a user, enforce device binding, then disable it', async
   );
   assert.equal(activateResponse.statusCode, 200);
   assert.equal(responseJson(activateResponse).user.subscriptionActive, true);
+
+  const enableBindingResponse = await jsonRequest(
+    'POST',
+    `/api/admin/users/${userId}/device-binding`,
+    { disabled: false },
+    authHeaders(adminToken, 'admin-device')
+  );
+  assert.equal(enableBindingResponse.statusCode, 200);
+  assert.equal(responseJson(enableBindingResponse).user.deviceBindingDisabled, false);
 
   const mismatchResponse = await jsonRequest(
     'POST',

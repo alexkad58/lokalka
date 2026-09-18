@@ -1448,6 +1448,10 @@ button.danger {
   background: linear-gradient(180deg, #0e131d 0%, #070a10 100%);
 }
 
+.recount-page .scanner-viewport {
+  touch-action: pan-y;
+}
+
 .tsd-page {
   width: min(820px, 100%);
   height: 100vh;
@@ -1678,6 +1682,22 @@ button.danger {
 
 .scanner-viewport.active video {
   opacity: 1;
+}
+
+.scanner-zoom {
+  position: absolute;
+  right: 10px;
+  bottom: 8px;
+  min-width: 42px;
+  padding: 3px 7px;
+  border-radius: 6px;
+  background: rgba(7, 10, 16, 0.76);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+  pointer-events: none;
 }
 
 .scanner-guide {

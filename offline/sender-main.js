@@ -104,7 +104,7 @@ async function buildFrameImages(sourceFrames, onProgress) {
       const offscreen = document.createElement('canvas');
       await QRCode.toCanvas(offscreen, sourceFrames[index], {
         errorCorrectionLevel: 'M',
-        margin: 2,
+        margin: 4,
         width: 560
       });
       images[index] = await createImageBitmap(offscreen);

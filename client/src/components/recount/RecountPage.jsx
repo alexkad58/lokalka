@@ -15,6 +15,8 @@ export default function RecountPage({
   toggleTorch,
   videoRef,
   focusScannerCamera,
+  adjustScannerZoom,
+  scannerZoom,
   handleScannerDoubleClick,
   loading,
   scannerStatus,
@@ -91,6 +93,8 @@ export default function RecountPage({
           scannerOn={scannerOn}
           videoRef={videoRef}
           focusScannerCamera={focusScannerCamera}
+          adjustScannerZoom={adjustScannerZoom}
+          scannerZoom={scannerZoom}
           handleScannerDoubleClick={handleScannerDoubleClick}
           loading={loading}
           scannerStatus={scannerStatus}

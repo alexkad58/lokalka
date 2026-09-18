@@ -8,6 +8,7 @@ export function useBarcodeScanner({ activeRecount, tsdOpen, qrOpen, onScannedCod
   const [scannerStatus, setScannerStatus] = useState('Сканер выключен');
   const [lastCode, setLastCode] = useState('');
   const [torchOn, setTorchOn] = useState(false);
+  const [scannerZoom, setScannerZoom] = useState(null);
   const [scanSuccessFlash, setScanSuccessFlash] = useState(false);
 
   const videoRef = useRef(null);
@@ -42,6 +43,17 @@ export function useBarcodeScanner({ activeRecount, tsdOpen, qrOpen, onScannedCod
       setScanSuccessFlash(false);
       flashTimeoutRef.current = 0;
     }, 220);
+  }
+
+  async function createZxingReader() {
+    const zxing = await import('@zxing/browser');
+    if (qrOpen) {
+      return new zxing.BrowserQRCodeReader(undefined, {
+        delayBetweenScanAttempts: 0,
+        delayBetweenScanSuccess: 0
+      });
+    }
+    return new zxing.BrowserMultiFormatReader();
   }
 
   // Prefer requestVideoFrameCallback: it fires once per actual decoded camera frame
@@ -91,8 +103,7 @@ export function useBarcodeScanner({ activeRecount, tsdOpen, qrOpen, onScannedCod
     if (!video) return;
 
     try {
-      const zxing = await import('@zxing/browser');
-      const reader = new zxing.BrowserMultiFormatReader();
+      const reader = await createZxingReader();
       zxingReaderRef.current = reader;
       const controls = await reader.decodeFromStream(scannerStreamRef.current, video, resultObj => {
         if (resultObj) {
@@ -123,18 +134,34 @@ export function useBarcodeScanner({ activeRecount, tsdOpen, qrOpen, onScannedCod
       unlockFeedbackAudio();
       setScannerStatus('Запуск камеры...');
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: 'environment' } },
+        video: {
+          facingMode: { ideal: 'environment' },
+          ...(qrOpen ? {
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+            frameRate: { ideal: 30 }
+          } : {})
+        },
         audio: false
       });
 
       scannerStreamRef.current = stream;
       video.srcObject = stream;
       await video.play();
+      const videoTrack = stream.getVideoTracks()[0];
+      const zoomCapability = videoTrack?.getCapabilities?.().zoom;
+      if (zoomCapability) {
+        const currentZoom = videoTrack.getSettings?.().zoom ?? zoomCapability.min;
+        setScannerZoom(currentZoom);
+      } else {
+        setScannerZoom(null);
+      }
+      if (qrOpen) void focusScannerCamera();
       track('scanner_started', { area: tsdOpen ? 'tsd' : qrOpen ? 'qr' : 'recount' });
 
       if (supportsBarcodeDetector()) {
         try {
-          const wantedFormats = ['code_128', 'ean_13', 'ean_8', 'qr_code'];
+          const wantedFormats = qrOpen ? ['qr_code'] : ['code_128', 'ean_13', 'ean_8', 'qr_code'];
           const supportedFormats = await window.BarcodeDetector.getSupportedFormats?.();
           const usableFormats = Array.isArray(supportedFormats)
             ? wantedFormats.filter(format => supportedFormats.includes(format))
@@ -152,8 +179,7 @@ export function useBarcodeScanner({ activeRecount, tsdOpen, qrOpen, onScannedCod
         }
       }
 
-      const zxing = await import('@zxing/browser');
-      const reader = new zxing.BrowserMultiFormatReader();
+      const reader = await createZxingReader();
       zxingReaderRef.current = reader;
       const controls = await reader.decodeFromVideoDevice(undefined, video, resultObj => {
         if (resultObj) {
@@ -172,6 +198,7 @@ export function useBarcodeScanner({ activeRecount, tsdOpen, qrOpen, onScannedCod
   function stopScanner() {
     setScannerOn(false);
     setTorchOn(false);
+    setScannerZoom(null);
     setScannerStatus('Сканер выключен');
     detectFailStreakRef.current = 0;
 
@@ -246,6 +273,32 @@ export function useBarcodeScanner({ activeRecount, tsdOpen, qrOpen, onScannedCod
     }
   }
 
+  async function adjustScannerZoom(direction) {
+    const trackItem = scannerStreamRef.current?.getVideoTracks?.()[0];
+    const zoomCapability = trackItem?.getCapabilities?.().zoom;
+    if (!trackItem?.applyConstraints || !zoomCapability || !direction) return;
+
+    const min = Number(zoomCapability.min);
+    const max = Number(zoomCapability.max);
+    const deviceStep = Number(zoomCapability.step) || 0.1;
+    const gestureStep = Math.max(deviceStep, 0.5);
+    const current = Number(trackItem.getSettings?.().zoom ?? scannerZoom ?? min);
+    const unclamped = current + Math.sign(direction) * gestureStep;
+    const clamped = Math.min(max, Math.max(min, unclamped));
+    const snapped = Math.min(max, Math.max(min,
+      min + Math.round((clamped - min) / deviceStep) * deviceStep
+    ));
+
+    if (Math.abs(snapped - current) < deviceStep / 2) return;
+
+    try {
+      await trackItem.applyConstraints({ advanced: [{ zoom: snapped }] });
+      setScannerZoom(trackItem.getSettings?.().zoom ?? snapped);
+    } catch {
+      setScannerStatus('Зум камеры не поддерживается');
+    }
+  }
+
   function handleScannerDoubleClick(event) {
     event.preventDefault();
     void toggleTorch();
@@ -266,6 +319,8 @@ export function useBarcodeScanner({ activeRecount, tsdOpen, qrOpen, onScannedCod
     toggleScanner,
     toggleTorch,
     focusScannerCamera,
+    adjustScannerZoom,
+    scannerZoom,
     handleScannerDoubleClick
   };
 }

@@ -77,7 +77,7 @@ export function createAuthRoutes({
         securityRole: false,
         subscriptionUntil: null,
         deviceId,
-        deviceBindingDisabled: false,
+        deviceBindingDisabled: true,
         referralUsedAt: null,
         referralActivationId: null
       };
