@@ -34,12 +34,9 @@ if (!scriptMatch || !styleMatch) throw new Error('Could not find generated sende
 
 const scriptPath = resolve(outputDir, scriptMatch[1].replace(/^\/+/, ''));
 const stylePath = resolve(outputDir, styleMatch[1].replace(/^\/+/, ''));
-const workerPath = resolve(root, 'client/node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs');
 const script = await readFile(scriptPath, 'utf8');
 const style = await readFile(stylePath, 'utf8');
-const worker = await readFile(workerPath, 'utf8');
 const encodedScript = Buffer.from(script, 'utf8').toString('base64');
-const encodedWorker = Buffer.from(worker, 'utf8').toString('base64');
 const bootstrapScript = [
   "if (typeof Promise.withResolvers !== 'function') {",
   '  Promise.withResolvers = () => {',
@@ -52,9 +49,21 @@ const bootstrapScript = [
   '    return { promise, resolve, reject };',
   '  };',
   '}',
+  "if (typeof ReadableStream !== 'undefined' && !ReadableStream.prototype[Symbol.asyncIterator]) {",
+  '  ReadableStream.prototype[Symbol.asyncIterator] = async function* () {',
+  '    const reader = this.getReader();',
+  '    try {',
+  '      while (true) {',
+  '        const { done, value } = await reader.read();',
+  '        if (done) return;',
+  '        yield value;',
+  '      }',
+  '    } finally {',
+  '      reader.releaseLock();',
+  '    }',
+  '  };',
+  '}',
   'const decode = b => Uint8Array.from(atob(b), char => char.charCodeAt(0));',
-  `const workerUrl = URL.createObjectURL(new Blob([decode('${encodedWorker}')], { type: 'text/javascript' }));`,
-  'globalThis.__txqrPdfWorkerSrc = workerUrl;',
   `const url = URL.createObjectURL(new Blob([decode('${encodedScript}')], { type: 'text/javascript' }));`,
   'import(url).finally(() => URL.revokeObjectURL(url));'
 ].join('\n');

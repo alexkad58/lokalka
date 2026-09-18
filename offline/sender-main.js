@@ -1,5 +1,5 @@
 import QRCode from 'qrcode';
-import { GlobalWorkerOptions, getDocument } from '../client/node_modules/pdfjs-dist/legacy/build/pdf.mjs';
+import { getDocument } from '../client/node_modules/pdfjs-dist/legacy/build/pdf.mjs';
 import { encode } from '../shared/txqr.js';
 import { extractRecountMeta, parseDocumentLines } from '../shared/recount-parser.js';
 
@@ -27,8 +27,6 @@ let startedAt = 0;
 let nextFrameAt = 0;
 let playing = false;
 
-GlobalWorkerOptions.workerSrc = globalThis.__txqrPdfWorkerSrc || '';
-
 function buildPageText(items) {
   const rows = [];
   for (const item of items) {
@@ -50,7 +48,7 @@ function buildPageText(items) {
 
 async function parsePdf(file) {
   const bytes = new Uint8Array(await file.arrayBuffer());
-  const document = await getDocument({ data: bytes }).promise;
+  const document = await getDocument({ data: bytes, disableWorker: true }).promise;
   const pages = [];
   for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
     const page = await document.getPage(pageNumber);
