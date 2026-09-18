@@ -1,5 +1,6 @@
 import QRCode from 'qrcode';
-import { GlobalWorkerOptions, getDocument } from '../client/node_modules/pdfjs-dist/legacy/build/pdf.mjs';
+import { getDocument } from '../client/node_modules/pdfjs-dist/legacy/build/pdf.mjs';
+import '../client/node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs';
 import { encode } from '../shared/txqr.js';
 import { extractRecountMeta, parseDocumentLines } from '../shared/recount-parser.js';
 
@@ -26,8 +27,6 @@ let rafId = 0;
 let startedAt = 0;
 let nextFrameAt = 0;
 let playing = false;
-
-GlobalWorkerOptions.workerSrc = globalThis.__txqrPdfWorkerSrc || '';
 
 function buildPageText(items) {
   const rows = [];
