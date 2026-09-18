@@ -40,7 +40,24 @@ const style = await readFile(stylePath, 'utf8');
 const worker = await readFile(workerPath, 'utf8');
 const encodedScript = Buffer.from(script, 'utf8').toString('base64');
 const encodedWorker = Buffer.from(worker, 'utf8').toString('base64');
-const bootstrapScript = `if(typeof Promise.withResolvers!=='function'){Promise.withResolvers=()=>{let resolve;let reject;const promise=new Promise((res,rej)=>{resolve=res;reject=rej;});return{promise,resolve,reject};};}const decode=b=>Uint8Array.from(atob(b),char=>char.charCodeAt(0));const workerUrl=URL.createObjectURL(new Blob([decode('${encodedWorker}')],{type:'text/javascript'}));globalThis.__txqrPdfWorkerSrc=workerUrl;const url=URL.createObjectURL(new Blob([decode('${encodedScript}')],{type:'text/javascript'}));import(url).finally(()=>URL.revokeObjectURL(url));`;
+const bootstrapScript = [
+  "if (typeof Promise.withResolvers !== 'function') {",
+  '  Promise.withResolvers = () => {',
+  '    let resolve;',
+  '    let reject;',
+  '    const promise = new Promise((res, rej) => {',
+  '      resolve = res;',
+  '      reject = rej;',
+  '    });',
+  '    return { promise, resolve, reject };',
+  '  };',
+  '}',
+  'const decode = b => Uint8Array.from(atob(b), char => char.charCodeAt(0));',
+  `const workerUrl = URL.createObjectURL(new Blob([decode('${encodedWorker}')], { type: 'text/javascript' }));`,
+  'globalThis.__txqrPdfWorkerSrc = workerUrl;',
+  `const url = URL.createObjectURL(new Blob([decode('${encodedScript}')], { type: 'text/javascript' }));`,
+  'import(url).finally(() => URL.revokeObjectURL(url));'
+].join('\n');
 
 html = html
   .replace(scriptMatch[0], `<script type="module">${bootstrapScript}</script>`)
